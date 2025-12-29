@@ -17,8 +17,8 @@ Advanced Pie Chart is a Power BI custom visual that renders a pie/donut chart wi
 
 ## Publisher links (required for submission)
 
-Current links (update if your repo URL changes):
-- Support (issues): https://github.com/dpandeycse/advancedPieChart/issues
-- Repo: https://github.com/dpandeycse/advancedPieChart
+- Current links (update if your repo URL changes):
+- Support (issues): https://github.com/dpandeycse-cmd/advancedPieChart/issues
+- Repo: https://github.com/dpandeycse-cmd/advancedPieChart
 - Support email: dpandeycse@gmail.com
 
