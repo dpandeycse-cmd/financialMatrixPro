@@ -20,3 +20,6 @@ Thumbs.db
 
 # Reports
 webpack.statistics.*
+
+# Git Credential Manager
+gcm-diagnose.log
