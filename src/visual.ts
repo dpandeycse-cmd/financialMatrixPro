@@ -12,6 +12,7 @@ import IVisual = powerbi.extensibility.visual.IVisual;
 import DataView = powerbi.DataView;
 
 import { VisualFormattingSettingsModel } from "./settings";
+import { buildMatrixTooltipItems } from "./tooltip";
 
 type DisplayUnit = "auto" | "none" | "thousands" | "millions" | "billions";
 
@@ -44,7 +45,7 @@ interface ColumnKey {
     measure?: string;
 }
 
-type ColumnBucket = "values" | "plan" | "forecast";
+type ColumnBucket = "values";
 
 interface BucketedColumnKey extends ColumnKey {
     bucket: ColumnBucket;
@@ -83,6 +84,8 @@ interface Model {
     hasGroup: boolean;
     rowFieldCount: number;
     showColumnTotal?: boolean;
+    tooltipMeasureNames?: string[];
+    rowSelectionIdByCode?: Map<string, powerbi.extensibility.ISelectionId>;
 }
 
 type CFRuleTarget = "rowHeader" | "columnHeader" | "cell";
@@ -215,7 +218,7 @@ interface CFConfig {
 type CTAggregation = "none" | "sum" | "avg" | "min" | "max" | "count";
 
 interface CTValueMapping {
-    field: string; // display label from bound fields (e.g. "Sales" or "Plan Sales" or a category name)
+    field: string; // display label from bound fields (e.g. "Sales" or a category name)
     aggregation: CTAggregation;
 }
 
@@ -279,6 +282,137 @@ function addOption(select: HTMLSelectElement, value: string, label: string): voi
     opt.value = value;
     opt.textContent = label;
     select.appendChild(opt);
+}
+
+interface FancySelect {
+    host: HTMLDivElement;
+    select: HTMLSelectElement;
+    setValue: (v: string) => void;
+    getValue: () => string;
+    syncFromSelect: () => void;
+}
+
+function createFancySelect(hostClassName: string = "fm-cf-select"): FancySelect {
+    const host = document.createElement("div");
+    host.className = `fm-dd ${hostClassName}`;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "fm-dd-btn";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+
+    const menu = document.createElement("div");
+    menu.className = "fm-dd-menu";
+    menu.hidden = true;
+
+    const select = document.createElement("select");
+    select.className = "fm-dd-native";
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+
+    host.appendChild(button);
+    host.appendChild(menu);
+    host.appendChild(select);
+
+    let isOpen = false;
+    let suppressDocHandler = false;
+
+    const close = () => {
+        if (!isOpen) return;
+        isOpen = false;
+        menu.hidden = true;
+        host.classList.remove("fm-dd-open");
+        button.setAttribute("aria-expanded", "false");
+        document.removeEventListener("mousedown", onDocMouseDown, true);
+        document.removeEventListener("keydown", onDocKeyDown, true);
+    };
+
+    const open = () => {
+        if (isOpen) return;
+        isOpen = true;
+        syncFromSelect();
+        menu.hidden = false;
+        host.classList.add("fm-dd-open");
+        button.setAttribute("aria-expanded", "true");
+        suppressDocHandler = true;
+        document.addEventListener("mousedown", onDocMouseDown, true);
+        document.addEventListener("keydown", onDocKeyDown, true);
+        setTimeout(() => { suppressDocHandler = false; }, 0);
+    };
+
+    const toggle = () => {
+        if (isOpen) close();
+        else open();
+    };
+
+    const onDocMouseDown = (ev: MouseEvent) => {
+        if (suppressDocHandler) return;
+        const target = ev.target as any;
+        if (!host.contains(target)) close();
+    };
+
+    const onDocKeyDown = (ev: KeyboardEvent) => {
+        if (!isOpen) return;
+        if (ev.key === "Escape") {
+            ev.preventDefault();
+            close();
+        }
+    };
+
+    const syncLabel = () => {
+        const current = select.value;
+        const match = Array.from(select.options).find(o => o.value === current);
+        button.textContent = match?.textContent || "";
+        button.disabled = !!select.disabled;
+        host.classList.toggle("fm-dd-disabled", !!select.disabled);
+    };
+
+    const syncFromSelect = () => {
+        syncLabel();
+        menu.textContent = "";
+        const opts = Array.from(select.options);
+        for (const opt of opts) {
+            const item = document.createElement("button");
+            item.type = "button";
+            item.className = "fm-dd-item";
+            item.textContent = opt.textContent || opt.value;
+            item.disabled = opt.disabled;
+            if (opt.value === select.value) item.classList.add("fm-dd-item-selected");
+            item.addEventListener("click", () => {
+                if (opt.disabled) return;
+                if (select.value !== opt.value) {
+                    select.value = opt.value;
+                    select.dispatchEvent(new Event("change"));
+                }
+                close();
+            });
+            menu.appendChild(item);
+        }
+    };
+
+    button.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (select.disabled) return;
+        toggle();
+    });
+
+    // Keep button label in sync when value changes programmatically.
+    select.addEventListener("change", () => {
+        syncLabel();
+    });
+
+    return {
+        host,
+        select,
+        setValue: (v: string) => {
+            select.value = v;
+            syncLabel();
+        },
+        getValue: () => select.value,
+        syncFromSelect
+    };
 }
 
 type TokenType = "number" | "string" | "ident" | "ref" | "op" | "comma" | "lparen" | "rparen" | "eof";
@@ -592,6 +726,9 @@ function toBool(v: any): boolean {
 
 export class Visual implements IVisual {
     private host: powerbi.extensibility.visual.IVisualHost;
+    private selectionManager: powerbi.extensibility.ISelectionManager;
+    private tooltipService: any = null;
+    private activeSelectionKeys: Set<string> = new Set();
     private formattingSettingsService: FormattingSettingsService;
     private formattingSettings: VisualFormattingSettingsModel;
     private root: HTMLDivElement;
@@ -610,27 +747,129 @@ export class Visual implements IVisual {
     private customTableBoundColumnFields: Array<{ key: string; label: string }> = [];
     private lastDataView: DataView | null = null;
     private lastViewport: powerbi.IViewport | null = null;
+    // Landing overlay (same pattern as advancedPieChart)
+    private landingEl: HTMLDivElement | null = null;
     private pendingCustomTableJson: string | null = null;
     private pendingCustomTableSetAt: number = 0;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
+        this.selectionManager = this.host.createSelectionManager();
+        try {
+            this.tooltipService = (this.host as any)?.tooltipService ?? null;
+        } catch {
+            this.tooltipService = null;
+        }
         this.formattingSettingsService = new FormattingSettingsService();
         this.formattingSettings = new VisualFormattingSettingsModel();
 
         this.root = document.createElement("div");
         this.root.className = "fm-container";
         options.element.appendChild(this.root);
+
+        // Keep a local view of selection so we can render selected row styling.
+        try {
+            const smAny: any = this.selectionManager as any;
+            if (smAny && typeof smAny.registerOnSelectCallback === "function") {
+                smAny.registerOnSelectCallback((ids: any[]) => {
+                    const keys = new Set<string>();
+                    if (Array.isArray(ids)) {
+                        for (const id of ids) {
+                            try {
+                                const k = typeof id?.getKey === "function" ? id.getKey() : "";
+                                if (k) keys.add(k);
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    }
+                    this.activeSelectionKeys = keys;
+                    // Re-render to apply selection highlight.
+                    if (this.lastDataView && this.lastViewport) {
+                        const model = this.buildModel(this.lastDataView);
+                        this.render(model, this.lastViewport);
+                    }
+                });
+            }
+        } catch {
+            // ignore selection callback wiring errors
+        }
+
+        this.ensureLandingOverlay();
+    }
+
+    private showTooltip(ev: MouseEvent, items: powerbi.extensibility.VisualTooltipDataItem[], selectionId?: powerbi.extensibility.ISelectionId | null): void {
+        const svc: any = this.tooltipService;
+        if (!svc || !Array.isArray(items) || items.length === 0) return;
+        try {
+            svc.show({
+                coordinates: [ev.clientX, ev.clientY],
+                dataItems: items,
+                identities: selectionId ? [selectionId] : undefined,
+                isTouchEvent: false
+            });
+        } catch {
+            // ignore tooltip errors
+        }
+    }
+
+    private hideTooltip(immediately: boolean = true): void {
+        const svc: any = this.tooltipService;
+        if (!svc) return;
+        try {
+            svc.hide({ isTouchEvent: false, immediately });
+        } catch {
+            // ignore tooltip errors
+        }
+    }
+
+    private applySelectionFromIds(ids: any[]): void {
+        const keys = new Set<string>();
+        if (Array.isArray(ids)) {
+            for (const id of ids) {
+                try {
+                    const k = typeof id?.getKey === "function" ? id.getKey() : "";
+                    if (k) keys.add(k);
+                } catch {
+                    // ignore
+                }
+            }
+        }
+        this.activeSelectionKeys = keys;
+    }
+
+    private selectRow(selectionId: powerbi.extensibility.ISelectionId | null, multiSelect: boolean = false): void {
+        if (!selectionId) return;
+        try {
+            const p: any = (this.selectionManager as any).select(selectionId, multiSelect);
+            if (p && typeof p.then === "function") {
+                p.then((ids: any[]) => {
+                    this.applySelectionFromIds(ids);
+                    if (this.lastDataView && this.lastViewport) {
+                        const model = this.buildModel(this.lastDataView);
+                        this.render(model, this.lastViewport);
+                    }
+                }).catch(() => {
+                    // ignore
+                });
+            }
+        } catch {
+            // ignore selection errors
+        }
     }
 
     public update(options: VisualUpdateOptions): void {
         const dataView = options.dataViews && options.dataViews[0];
         if (!dataView) {
-            this.renderMessage("Add data to: Row + Values.", options.viewport);
+            this.lastViewport = options.viewport;
+            this.hideLanding();
+            this.renderEmptyState(options.viewport, { reason: "noDataView", missingRow: true, missingValues: true });
             return;
         }
         this.lastDataView = dataView;
         this.lastViewport = options.viewport;
+
+        this.ensureLandingOverlay();
 
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualFormattingSettingsModel, dataView);
 
@@ -665,6 +904,54 @@ export class Visual implements IVisual {
             else if (!String(this.customTableJson || "").trim()) this.customTableJson = dvCtJson;
         }
 
+        // Hint behavior (same approach as advancedPieChart):
+        // Show landing message when required roles are missing; hide as soon as ready.
+        const ctCard: any = (this.formattingSettings as any).customTable;
+        const customTableEnabled = (ctCard?.enabled?.value as boolean | undefined) ?? false;
+
+        // If nothing is bound at all, Power BI may still provide a DataView shell.
+        // Use categorical presence (not metadata fallback) to decide the landing state.
+        const categorical: any = (dataView as any)?.categorical;
+        const catsNow: any[] = (categorical?.categories as any[]) || [];
+        const valsNow: any[] = (categorical?.values as any[]) || [];
+        const hasAnyCategoricalBound = (catsNow.length > 0) || (valsNow.length > 0);
+
+        if (!hasAnyCategoricalBound) {
+            this.hideLanding();
+            this.renderEmptyState(options.viewport, { reason: "missingBindings", missingRow: true, missingValues: true });
+            return;
+        }
+
+        if (customTableEnabled) {
+            // Custom Table mode: require at least one measure bound.
+            // UX rule: once the user starts binding anything, hide the onboarding (even if not fully ready).
+            const hasAnyValue = valsNow.some(v => {
+                const roles: any = v?.source?.roles || {};
+                return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+            });
+            if (!hasAnyValue) {
+                this.hideLanding();
+                this.clearRoot();
+                return;
+            }
+        } else {
+            const hasRow = catsNow.some(c => !!c?.source?.roles?.category);
+            const hasAnyValue = valsNow.some(v => {
+                const roles: any = v?.source?.roles || {};
+                return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+            });
+
+            // UX rule: as soon as *any* field is added (any role), hide the onboarding.
+            // If bindings are incomplete, render nothing (avoid blocking the canvas with the guide).
+            if (!hasRow || !hasAnyValue) {
+                this.hideLanding();
+                this.clearRoot();
+                return;
+            }
+        }
+
+        this.hideLanding();
+
         const model = this.buildModel(dataView);
 
         // Populate available fields for "Based on field" and Custom Table value pickers from the actual bound metadata.
@@ -688,24 +975,20 @@ export class Visual implements IVisual {
             const roles: any = c?.roles || {};
             // Only include measures / value roles to avoid flooding with row/column categories.
             const isMeasure = !!c?.isMeasure;
-            const isValueRole = !!roles?.values || !!roles?.plan || !!roles?.forecast || !!roles?.formatBy;
+            const isValueRole = !!roles?.values || !!roles?.formatBy || !!roles?.tooltips;
             if (!isMeasure && !isValueRole) continue;
-            if (roles.plan) out.add(`Plan ${name}`);
-            else if (roles.forecast) out.add(`Forecast ${name}`);
-            else out.add(name);
+            out.add(name);
 
-            if (roles.plan) outMeasures.add(`Plan ${name}`);
-            else if (roles.forecast) outMeasures.add(`Forecast ${name}`);
-            else if (isMeasure || !!roles?.values || !!roles?.formatBy) outMeasures.add(name);
+            if (isMeasure || !!roles?.values || !!roles?.formatBy) outMeasures.add(name);
 
             // Custom table fallback uses the same labels.
-            const fallbackLabel = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
+            const fallbackLabel = name;
             ctFallbackOut.add(fallbackLabel);
             ctFallbackIsMeasure.set(fallbackLabel, true);
 
             // Dedicated Custom Table values role
             if (roles.customTableValue) {
-                const ctLabel = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
+                const ctLabel = name;
                 ctRoleOut.add(ctLabel);
                 ctRoleIsMeasure.set(ctLabel, true);
             }
@@ -718,20 +1001,15 @@ export class Visual implements IVisual {
             const name = String((src?.displayName || src?.queryName || "")).trim();
             if (!name) continue;
             const roles: any = src?.roles || {};
-            if (roles.plan) out.add(`Plan ${name}`);
-            else if (roles.forecast) out.add(`Forecast ${name}`);
-            else out.add(name);
+            out.add(name);
+            outMeasures.add(name);
 
-            if (roles.plan) outMeasures.add(`Plan ${name}`);
-            else if (roles.forecast) outMeasures.add(`Forecast ${name}`);
-            else outMeasures.add(name);
-
-            const fallbackLabel = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
+            const fallbackLabel = name;
             ctFallbackOut.add(fallbackLabel);
             ctFallbackIsMeasure.set(fallbackLabel, true);
 
             if (roles.customTableValue) {
-                const ctLabel = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
+                const ctLabel = name;
                 ctRoleOut.add(ctLabel);
                 ctRoleIsMeasure.set(ctLabel, true);
             }
@@ -797,6 +1075,69 @@ export class Visual implements IVisual {
         }
 
         this.render(model, options.viewport);
+    }
+
+    private ensureLandingOverlay(): void {
+        if (this.landingEl && this.landingEl.parentElement === this.root) return;
+        const existing = this.root.querySelector<HTMLDivElement>(".fm-landing");
+        if (existing) {
+            this.landingEl = existing;
+            return;
+        }
+        const el = document.createElement("div");
+        el.className = "fm-landing";
+        (el as any).dataset.fmPersist = "1";
+        el.style.display = "none";
+        this.root.appendChild(el);
+        this.landingEl = el;
+    }
+
+    private showLanding(message: string): void {
+        this.ensureLandingOverlay();
+        if (!this.landingEl) return;
+        this.landingEl.textContent = message;
+        this.landingEl.style.display = "block";
+    }
+
+    private hideLanding(): void {
+        if (!this.landingEl) return;
+        this.landingEl.style.display = "none";
+        this.landingEl.textContent = "";
+    }
+
+    private hasAnyBoundField(dataView: DataView): boolean {
+        const cats: any[] = ((dataView as any)?.categorical?.categories as any[]) || [];
+        const vals: any[] = ((dataView as any)?.categorical?.values as any[]) || [];
+
+        if (cats.length > 0 || vals.length > 0) return true;
+
+        const metaCols: any[] = ((dataView as any)?.metadata?.columns as any[]) || [];
+        return metaCols.some(c => {
+            const roles: any = c?.roles || {};
+            return !!roles.column || !!roles.category || !!roles.values || !!roles.formatBy || !!roles.formatByField || !!roles.customTableValue || !!roles.customTableValueField;
+        });
+    }
+
+    private getBindingStatus(dataView: DataView): { hasRow: boolean; hasAnyValue: boolean } {
+        const cats: any[] = ((dataView as any)?.categorical?.categories as any[]) || [];
+        const vals: any[] = ((dataView as any)?.categorical?.values as any[]) || [];
+
+        const hasRow = cats.some(c => !!c?.source?.roles?.category);
+        const hasAnyValue = vals.some(v => {
+            const roles: any = v?.source?.roles || {};
+            return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+        });
+
+        if (hasRow || hasAnyValue) return { hasRow, hasAnyValue };
+
+        // Fallback: some shapes expose roles only via metadata columns.
+        const metaCols: any[] = ((dataView as any)?.metadata?.columns as any[]) || [];
+        const metaHasRow = metaCols.some(c => !!c?.roles?.category);
+        const metaHasAnyValue = metaCols.some(c => {
+            const roles: any = c?.roles || {};
+            return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+        });
+        return { hasRow: metaHasRow, hasAnyValue: metaHasAnyValue };
     }
 
     private getObjectValue<T>(dataView: DataView, objectName: string, propertyName: string, defaultValue: T): T {
@@ -1456,10 +1797,19 @@ export class Visual implements IVisual {
             return inp;
         };
 
-        const makeSelect = (): HTMLSelectElement => {
-            const s = document.createElement("select");
-            s.className = "fm-cf-select";
-            return s;
+        const wrapField = (labelText: string, control: HTMLElement): HTMLDivElement => {
+            const wrap = document.createElement("div");
+            wrap.className = "fm-cf-field";
+            const lab = document.createElement("div");
+            lab.className = "fm-cf-label";
+            lab.textContent = labelText;
+            wrap.appendChild(lab);
+            wrap.appendChild(control);
+            return wrap;
+        };
+
+        const makeSelect = (): FancySelect => {
+            return createFancySelect("fm-cf-select");
         };
 
         const makeNumInput = (value: number | undefined, placeholder: string): HTMLInputElement => {
@@ -1475,14 +1825,15 @@ export class Visual implements IVisual {
         };
 
         const fontOptions = ["", "Segoe UI", "Arial", "Calibri"];
-        const makeFontSelect = (value: string | undefined): HTMLSelectElement => {
+        const makeFontSelect = (value: string | undefined): FancySelect => {
             const s = makeSelect();
-            addOption(s, "", "(Default font)");
+            addOption(s.select, "", "(Default font)");
             for (const f of fontOptions) {
                 if (!f) continue;
-                addOption(s, f, f);
+                addOption(s.select, f, f);
             }
-            s.value = (value || "").trim();
+            s.setValue((value || "").trim());
+            s.syncFromSelect();
             return s;
         };
 
@@ -1531,6 +1882,7 @@ export class Visual implements IVisual {
             for (let i = 0; i < draft.parents.length; i++) {
                 const p = draft.parents[i];
                 const block = document.createElement("div");
+                block.className = "fm-ct-card";
 
                 const row = document.createElement("div");
                 row.className = "fm-ct-row";
@@ -1568,8 +1920,8 @@ export class Visual implements IVisual {
                 const color = makeColorInput(p.format.color);
                 const bold = makeBoldToggle(p.format.bold);
 
-                font.onchange = () => {
-                    const v = String(font.value || "").trim();
+                font.select.onchange = () => {
+                    const v = String(font.getValue() || "").trim();
                     p.format = p.format || {};
                     p.format.fontFamily = v || undefined;
                 };
@@ -1594,19 +1946,28 @@ export class Visual implements IVisual {
                 boldTxt.textContent = "Bold";
                 boldWrap.appendChild(boldTxt);
 
-                row.appendChild(no);
-                row.appendChild(name);
-                row.appendChild(font);
-                row.appendChild(size);
-                row.appendChild(color);
-                row.appendChild(boldWrap);
-                row.appendChild(del);
+                row.appendChild(wrapField("Parent No", no));
+                row.appendChild(wrapField("Parent Name", name));
+                row.appendChild(wrapField("Font", font.host));
+                row.appendChild(wrapField("Size", size));
+                row.appendChild(wrapField("Color", color));
+                row.appendChild(wrapField("Bold", boldWrap));
+
+                const rowActions = document.createElement("div");
+                rowActions.className = "fm-ct-row-actions";
+                rowActions.appendChild(del);
+                row.appendChild(rowActions);
 
                 block.appendChild(row);
 
                 // Parent value mappings (optional)
                 const mappings = document.createElement("div");
                 mappings.className = "fm-ct-mappings";
+
+                const mappingsTitle = document.createElement("div");
+                mappingsTitle.className = "fm-cf-label";
+                mappingsTitle.textContent = "Values";
+                mappings.appendChild(mappingsTitle);
 
                 const ensureValues = () => {
                     if (!Array.isArray((p as any).values) || (p as any).values.length === 0) {
@@ -1620,6 +1981,7 @@ export class Visual implements IVisual {
 
                 const renderMappings = () => {
                     mappings.textContent = "";
+                    mappings.appendChild(mappingsTitle);
                     ensureValues();
                     const vals: any[] = (p as any).values;
                     for (let mi = 0; mi < vals.length; mi++) {
@@ -1631,22 +1993,22 @@ export class Visual implements IVisual {
                         const aggSel = makeAggSelect(m.aggregation);
 
                         const applyMeasureRules = () => {
-                            const isMeasure = isMeasureField(fieldSel.value);
+                            const isMeasure = isMeasureField(fieldSel.getValue());
                             if (isMeasure) {
                                 m.aggregation = "none";
-                                aggSel.value = "none";
-                                aggSel.disabled = true;
+                                aggSel.setValue("none");
+                                aggSel.select.disabled = true;
                             } else {
-                                aggSel.disabled = false;
+                                aggSel.select.disabled = false;
                             }
                         };
 
-                        fieldSel.onchange = () => {
-                            m.field = fieldSel.value;
+                        fieldSel.select.onchange = () => {
+                            m.field = fieldSel.getValue();
                             applyMeasureRules();
                         };
-                        aggSel.onchange = () => {
-                            m.aggregation = (aggSel.value as CTAggregation) || "none";
+                        aggSel.select.onchange = () => {
+                            m.aggregation = (aggSel.getValue() as CTAggregation) || "none";
                         };
                         applyMeasureRules();
 
@@ -1678,8 +2040,8 @@ export class Visual implements IVisual {
                             if (rerenderChildrenFn) rerenderChildrenFn();
                         };
 
-                        mRow.appendChild(fieldSel);
-                        mRow.appendChild(aggSel);
+                        mRow.appendChild(fieldSel.host);
+                        mRow.appendChild(aggSel.host);
                         mRow.appendChild(add);
                         mRow.appendChild(rem);
                         mappings.appendChild(mRow);
@@ -1716,37 +2078,41 @@ export class Visual implements IVisual {
         childrenList.className = "fm-ct-list";
         childrenWrap.appendChild(childrenList);
 
-        const makeParentNoSelect = (value: string): HTMLSelectElement => {
+        const makeParentNoSelect = (value: string): FancySelect => {
             const s = makeSelect();
-            addOption(s, "", "(No parent)");
+            addOption(s.select, "", "(No parent)");
             for (const p of draft.parents) {
                 const label = p.parentName ? `${p.parentNo} — ${p.parentName}` : p.parentNo;
-                addOption(s, p.parentNo, label);
+                addOption(s.select, p.parentNo, label);
             }
-            s.value = value || "";
+            s.setValue(value || "");
+            s.syncFromSelect();
             return s;
         };
 
-        const makeFieldSelect = (value: string): HTMLSelectElement => {
+        const makeFieldSelect = (value: string): FancySelect => {
             const s = makeSelect();
-            addOption(s, "", "Select value field");
-            for (const f of fields) addOption(s, f, f);
-            s.value = value || "";
+            addOption(s.select, "", "Select value field");
+            for (const f of fields) addOption(s.select, f, f);
+            s.setValue(value || "");
+            s.syncFromSelect();
             return s;
         };
 
-        const makeAggSelect = (value: CTAggregation): HTMLSelectElement => {
+        const makeAggSelect = (value: CTAggregation): FancySelect => {
             const s = makeSelect();
-            for (const a of aggOptions) addOption(s, a.v, a.t);
-            s.value = value || "none";
+            for (const a of aggOptions) addOption(s.select, a.v, a.t);
+            s.setValue(value || "none");
+            s.syncFromSelect();
             return s;
         };
 
-        const makeCategoryFieldSelect = (value: string, placeholder: string): HTMLSelectElement => {
+        const makeCategoryFieldSelect = (value: string, placeholder: string): FancySelect => {
             const s = makeSelect();
-            addOption(s, "", placeholder);
-            for (const f of (this.customTableAvailableCategoryFields || [])) addOption(s, f, f);
-            s.value = value || "";
+            addOption(s.select, "", placeholder);
+            for (const f of (this.customTableAvailableCategoryFields || [])) addOption(s.select, f, f);
+            s.setValue(value || "");
+            s.syncFromSelect();
             return s;
         };
 
@@ -1760,7 +2126,7 @@ export class Visual implements IVisual {
             for (let i = 0; i < draft.children.length; i++) {
                 const c = draft.children[i];
                 const row = document.createElement("div");
-                row.className = "fm-ct-child";
+                row.className = "fm-ct-child fm-ct-card";
 
                 const top = document.createElement("div");
                 top.className = "fm-ct-child-top";
@@ -1782,10 +2148,13 @@ export class Visual implements IVisual {
                 const childFieldSel = makeCategoryFieldSelect(String((c as any).childNameFromField || "").trim(), "Child name field");
                 const parentMatchSel = makeCategoryFieldSelect(String((c as any).parentMatchField || "").trim(), "(Optional) Parent match field");
 
+                const childFieldWrap = wrapField("Child name field", childFieldSel.host);
+                const parentMatchWrap = wrapField("Parent match field", parentMatchSel.host);
+
                 const syncAutoUi = () => {
                     const enabled = autoChk.checked;
-                    childFieldSel.style.display = enabled ? "" : "none";
-                    parentMatchSel.style.display = enabled ? "" : "none";
+                    childFieldWrap.style.display = enabled ? "" : "none";
+                    parentMatchWrap.style.display = enabled ? "" : "none";
                     childName.disabled = enabled;
                     if (enabled) {
                         c.childName = "";
@@ -1801,8 +2170,8 @@ export class Visual implements IVisual {
                 const color = makeColorInput(c.format.color);
                 const bold = makeBoldToggle(c.format.bold);
 
-                font.onchange = () => {
-                    const v = String(font.value || "").trim();
+                font.select.onchange = () => {
+                    const v = String(font.getValue() || "").trim();
                     c.format = c.format || {};
                     c.format.fontFamily = v || undefined;
                 };
@@ -1827,8 +2196,8 @@ export class Visual implements IVisual {
                 boldTxt.textContent = "Bold";
                 boldWrap.appendChild(boldTxt);
 
-                parentSel.onchange = () => {
-                    c.setParentNo = parentSel.value;
+                parentSel.select.onchange = () => {
+                    c.setParentNo = parentSel.getValue();
                 };
                 childName.oninput = () => {
                     c.childName = childName.value;
@@ -1836,8 +2205,8 @@ export class Visual implements IVisual {
 
                 autoChk.onchange = () => {
                     if (autoChk.checked) {
-                        (c as any).childNameFromField = String(childFieldSel.value || "").trim() || undefined;
-                        (c as any).parentMatchField = String(parentMatchSel.value || "").trim() || undefined;
+                        (c as any).childNameFromField = String(childFieldSel.getValue() || "").trim() || undefined;
+                        (c as any).parentMatchField = String(parentMatchSel.getValue() || "").trim() || undefined;
                     } else {
                         (c as any).childNameFromField = undefined;
                         (c as any).parentMatchField = undefined;
@@ -1845,11 +2214,11 @@ export class Visual implements IVisual {
                     syncAutoUi();
                 };
 
-                childFieldSel.onchange = () => {
-                    (c as any).childNameFromField = String(childFieldSel.value || "").trim() || undefined;
+                childFieldSel.select.onchange = () => {
+                    (c as any).childNameFromField = String(childFieldSel.getValue() || "").trim() || undefined;
                 };
-                parentMatchSel.onchange = () => {
-                    (c as any).parentMatchField = String(parentMatchSel.value || "").trim() || undefined;
+                parentMatchSel.select.onchange = () => {
+                    (c as any).parentMatchField = String(parentMatchSel.getValue() || "").trim() || undefined;
                 };
 
                 const del = document.createElement("button");
@@ -1861,22 +2230,31 @@ export class Visual implements IVisual {
                     renderChildren();
                 };
 
-                top.appendChild(parentSel);
-                top.appendChild(childName);
-                top.appendChild(autoWrap);
-                top.appendChild(childFieldSel);
-                top.appendChild(parentMatchSel);
-                top.appendChild(font);
-                top.appendChild(size);
-                top.appendChild(color);
-                top.appendChild(boldWrap);
-                top.appendChild(del);
+                top.appendChild(wrapField("Parent", parentSel.host));
+                top.appendChild(wrapField("Child name", childName));
+                top.appendChild(wrapField("Auto", autoWrap));
+                top.appendChild(childFieldWrap);
+                top.appendChild(parentMatchWrap);
+                top.appendChild(wrapField("Font", font.host));
+                top.appendChild(wrapField("Size", size));
+                top.appendChild(wrapField("Color", color));
+                top.appendChild(wrapField("Bold", boldWrap));
+
+                const topActions = document.createElement("div");
+                topActions.className = "fm-ct-row-actions";
+                topActions.appendChild(del);
+                top.appendChild(topActions);
                 row.appendChild(top);
 
                 syncAutoUi();
 
                 const mappings = document.createElement("div");
                 mappings.className = "fm-ct-mappings";
+
+                const mappingsTitle = document.createElement("div");
+                mappingsTitle.className = "fm-cf-label";
+                mappingsTitle.textContent = "Values";
+                mappings.appendChild(mappingsTitle);
 
                 const ensureValues = () => {
                     if (!Array.isArray(c.values) || c.values.length === 0) {
@@ -1890,6 +2268,7 @@ export class Visual implements IVisual {
 
                 const renderMappings = () => {
                     mappings.textContent = "";
+                    mappings.appendChild(mappingsTitle);
                     ensureValues();
                     for (let mi = 0; mi < c.values.length; mi++) {
                         const m = c.values[mi];
@@ -1900,22 +2279,22 @@ export class Visual implements IVisual {
                         const aggSel = makeAggSelect(m.aggregation);
 
                         const applyMeasureRules = () => {
-                            const isMeasure = isMeasureField(fieldSel.value);
+                            const isMeasure = isMeasureField(fieldSel.getValue());
                             if (isMeasure) {
                                 m.aggregation = "none";
-                                aggSel.value = "none";
-                                aggSel.disabled = true;
+                                aggSel.setValue("none");
+                                aggSel.select.disabled = true;
                             } else {
-                                aggSel.disabled = false;
+                                aggSel.select.disabled = false;
                             }
                         };
 
-                        fieldSel.onchange = () => {
-                            m.field = fieldSel.value;
+                        fieldSel.select.onchange = () => {
+                            m.field = fieldSel.getValue();
                             applyMeasureRules();
                         };
-                        aggSel.onchange = () => {
-                            m.aggregation = (aggSel.value as CTAggregation) || "none";
+                        aggSel.select.onchange = () => {
+                            m.aggregation = (aggSel.getValue() as CTAggregation) || "none";
                         };
 
                         applyMeasureRules();
@@ -1946,8 +2325,8 @@ export class Visual implements IVisual {
                             renderChildren();
                         };
 
-                        mRow.appendChild(fieldSel);
-                        mRow.appendChild(aggSel);
+                        mRow.appendChild(fieldSel.host);
+                        mRow.appendChild(aggSel.host);
                         mRow.appendChild(add);
                         mRow.appendChild(rem);
                         mappings.appendChild(mRow);
@@ -2122,10 +2501,7 @@ export class Visual implements IVisual {
                 const parts = key.split("||");
                 if (parts.length < 2) return "";
                 const measure = (parts[parts.length - 1] || "").trim();
-                const bucket = (parts[parts.length - 2] || "").trim().toLowerCase();
                 if (!measure) return "";
-                if (bucket === "plan") return `Plan ${measure}`;
-                if (bucket === "forecast") return `Forecast ${measure}`;
                 return measure;
             };
 
@@ -2213,31 +2589,31 @@ export class Visual implements IVisual {
             return wrap;
         };
 
-        const applyToSel = document.createElement("select");
-        applyToSel.className = "fm-cf-select";
-        addOption(applyToSel, "all", "All");
-        addOption(applyToSel, "cell", "Values only");
-        addOption(applyToSel, "rowHeader", "Row headers");
-        addOption(applyToSel, "columnHeader", "Column headers");
-        applyToSel.value = currentTarget;
-        applyToSel.addEventListener("change", () => {
-            const v = applyToSel.value as ApplyToView;
+        const applyToSel = createFancySelect("fm-cf-select");
+        addOption(applyToSel.select, "all", "All");
+        addOption(applyToSel.select, "cell", "Values only");
+        addOption(applyToSel.select, "rowHeader", "Row headers");
+        addOption(applyToSel.select, "columnHeader", "Column headers");
+        applyToSel.setValue(currentTarget);
+        applyToSel.syncFromSelect();
+        applyToSel.select.addEventListener("change", () => {
+            const v = applyToSel.getValue() as ApplyToView;
             currentTarget = v;
             if (v !== "all") lastSpecificTarget = v;
             rerender();
         });
-        mkField("Apply to", applyToSel);
+        mkField("Apply to", applyToSel.host);
 
-        const formatStyleSel = document.createElement("select");
-        formatStyleSel.className = "fm-cf-select";
-        addOption(formatStyleSel, "rules", "Rules");
-        addOption(formatStyleSel, "gradient", "Gradient");
-        addOption(formatStyleSel, "fieldValue", "Field value");
-        formatStyleSel.addEventListener("change", () => {
-            const v = formatStyleSel.value as CFFormatStyle;
+        const formatStyleSel = createFancySelect("fm-cf-select");
+        addOption(formatStyleSel.select, "rules", "Rules");
+        addOption(formatStyleSel.select, "gradient", "Gradient");
+        addOption(formatStyleSel.select, "fieldValue", "Field value");
+        formatStyleSel.syncFromSelect();
+        formatStyleSel.select.addEventListener("change", () => {
+            const v = formatStyleSel.getValue() as CFFormatStyle;
             if (currentProp === "icon" && v === "gradient") {
                 // Icons don't support gradients.
-                formatStyleSel.value = "rules";
+                formatStyleSel.setValue("rules");
                 setCurrentSurface({ formatStyle: "rules", iconPlacement } as any);
                 rerender();
                 return;
@@ -2280,31 +2656,31 @@ export class Visual implements IVisual {
             }
             rerender();
         });
-        mkField("Format style", formatStyleSel);
+        mkField("Format style", formatStyleSel.host);
 
-        const iconPlacementSel = document.createElement("select");
-        iconPlacementSel.className = "fm-cf-select";
-        addOption(iconPlacementSel, "left", "Icon left of value");
-        addOption(iconPlacementSel, "right", "Icon right of value");
-        addOption(iconPlacementSel, "only", "Only icon (hide value)");
-        iconPlacementSel.value = iconPlacement;
-        iconPlacementSel.addEventListener("change", () => {
-            iconPlacement = iconPlacementSel.value as CFIconPlacement;
+        const iconPlacementSel = createFancySelect("fm-cf-select");
+        addOption(iconPlacementSel.select, "left", "Icon left of value");
+        addOption(iconPlacementSel.select, "right", "Icon right of value");
+        addOption(iconPlacementSel.select, "only", "Only icon (hide value)");
+        iconPlacementSel.setValue(iconPlacement);
+        iconPlacementSel.syncFromSelect();
+        iconPlacementSel.select.addEventListener("change", () => {
+            iconPlacement = iconPlacementSel.getValue() as CFIconPlacement;
             const s = getCurrentSurface();
             if (currentTarget !== "all" && currentProp === "icon") {
                 setCurrentSurface({ ...(s as any), iconPlacement } as any);
             }
             rerender();
         });
-        const iconPlacementField = mkField("Icon display", iconPlacementSel);
+        const iconPlacementField = mkField("Icon display", iconPlacementSel.host);
 
-        const basedOnSel = document.createElement("select");
-        basedOnSel.className = "fm-cf-select";
-        addOption(basedOnSel, "", "(All fields)");
-        for (const f of uniqueFields) addOption(basedOnSel, f, f);
-        basedOnSel.value = basedOnField;
-        basedOnSel.addEventListener("change", () => {
-            basedOnField = basedOnSel.value;
+        const basedOnSel = createFancySelect("fm-cf-select");
+        addOption(basedOnSel.select, "", "(All fields)");
+        for (const f of uniqueFields) addOption(basedOnSel.select, f, f);
+        basedOnSel.setValue(basedOnField);
+        basedOnSel.syncFromSelect();
+        basedOnSel.select.addEventListener("change", () => {
+            basedOnField = basedOnSel.getValue();
             const s = getCurrentSurface();
             if (currentTarget !== "all" && s.formatStyle !== "rules") {
                 if (s.formatStyle === "gradient") {
@@ -2315,7 +2691,7 @@ export class Visual implements IVisual {
             }
             rerender();
         });
-        mkField("Based on field", basedOnSel);
+        mkField("Based on field", basedOnSel.host);
 
         const reverseBtn = document.createElement("button");
         reverseBtn.type = "button";
@@ -2361,12 +2737,12 @@ export class Visual implements IVisual {
             };
 
             const mkSel = (opts: Array<{ v: string; l: string }>, value: string, onChange: (v: string) => void) => {
-                const sel = document.createElement("select");
-                sel.className = "fm-cf-select";
-                for (const o of opts) addOption(sel, o.v, o.l);
-                sel.value = value;
-                sel.addEventListener("change", () => onChange(sel.value));
-                sentence.appendChild(sel);
+                const sel = createFancySelect("fm-cf-select");
+                for (const o of opts) addOption(sel.select, o.v, o.l);
+                sel.setValue(value);
+                sel.syncFromSelect();
+                sel.select.addEventListener("change", () => onChange(sel.getValue()));
+                sentence.appendChild(sel.host);
                 return sel;
             };
 
@@ -2495,21 +2871,21 @@ export class Visual implements IVisual {
             const effectiveProp: CFFormatProp = (currentTarget === "all") ? (rule.formatProp || currentProp) : currentProp;
 
             if (effectiveProp === "icon") {
-                const iconSel = document.createElement("select");
-                iconSel.className = "fm-cf-select";
-                addOption(iconSel, "", "(None)");
-                for (const ic of CF_BUILTIN_ICONS) addOption(iconSel, ic.key, ic.label);
-                iconSel.value = (rule.style?.iconName || "").trim();
-                iconSel.addEventListener("change", () => {
+                const iconSel = createFancySelect("fm-cf-select");
+                addOption(iconSel.select, "", "(None)");
+                for (const ic of CF_BUILTIN_ICONS) addOption(iconSel.select, ic.key, ic.label);
+                iconSel.setValue((rule.style?.iconName || "").trim());
+                iconSel.syncFromSelect();
+                iconSel.select.addEventListener("change", () => {
                     if (currentTarget !== "all") rule.formatProp = currentProp;
-                    const v = iconSel.value;
+                    const v = iconSel.getValue();
                     if (!v) {
                         delete (rule.style as any).iconName;
                     } else {
                         rule.style.iconName = v;
                     }
                 });
-                row.appendChild(iconSel);
+                row.appendChild(iconSel.host);
             } else {
                 const color = document.createElement("input");
                 color.type = "color";
@@ -2575,7 +2951,7 @@ export class Visual implements IVisual {
             if (currentProp === "icon") {
                 const ip = (surface as any).iconPlacement as CFIconPlacement | undefined;
                 iconPlacement = ip ?? iconPlacement;
-                iconPlacementSel.value = iconPlacement;
+                iconPlacementSel.setValue(iconPlacement);
             }
 
             // For Field value formatting, Power BI requires a field selection.
@@ -2587,21 +2963,21 @@ export class Visual implements IVisual {
                 if (first) {
                     basedOnField = first;
                     setCurrentSurface({ ...(surface as any), basedOnField } as any);
-                    basedOnSel.value = basedOnField;
+                    basedOnSel.setValue(basedOnField);
                 }
             }
 
-            basedOnSel.disabled = currentTarget === "all";
-            formatStyleSel.disabled = currentTarget === "all";
-            iconPlacementSel.disabled = currentTarget === "all" || currentProp !== "icon";
+            basedOnSel.select.disabled = currentTarget === "all";
+            formatStyleSel.select.disabled = currentTarget === "all";
+            iconPlacementSel.select.disabled = currentTarget === "all" || currentProp !== "icon";
             iconPlacementField.style.display = currentProp === "icon" ? "" : "none";
-            formatStyleSel.value = (currentTarget === "all") ? "rules" : surface.formatStyle;
+            formatStyleSel.setValue((currentTarget === "all") ? "rules" : surface.formatStyle);
 
             tabBg.classList.toggle("fm-cf-tab-active", currentProp === "background");
             tabFont.classList.toggle("fm-cf-tab-active", currentProp === "fontColor");
             tabIcon.classList.toggle("fm-cf-tab-active", currentProp === "icon");
 
-            const optGradient = formatStyleSel.querySelector('option[value="gradient"]') as HTMLOptionElement | null;
+            const optGradient = formatStyleSel.select.querySelector('option[value="gradient"]') as HTMLOptionElement | null;
             if (optGradient) optGradient.disabled = currentProp === "icon";
 
             // Show the list area for both Rules and non-rules surfaces.
@@ -2616,7 +2992,7 @@ export class Visual implements IVisual {
                     // ensure the dropdown reflects surface
                     const bof = (surface as any).basedOnField as string | undefined;
                     basedOnField = bof ?? basedOnField;
-                    basedOnSel.value = basedOnField;
+                    basedOnSel.setValue(basedOnField);
                 }
             }
 
@@ -2652,7 +3028,7 @@ export class Visual implements IVisual {
                     }
                     // Keep UI state reasonable.
                     basedOnField = "";
-                    basedOnSel.value = "";
+                    basedOnSel.setValue("");
                     rerender();
                 });
                 clearWrap.appendChild(clearBtn);
@@ -2689,7 +3065,8 @@ export class Visual implements IVisual {
                 editBtn.addEventListener("click", () => {
                     // Keep it simple: focus the most relevant control.
                     if (surface.formatStyle === "gradient" || surface.formatStyle === "fieldValue") {
-                        basedOnSel.focus();
+                        const btn = basedOnSel.host.querySelector(".fm-dd-btn") as HTMLButtonElement | null;
+                        if (btn) btn.focus();
                     }
                 });
                 appliedRow.appendChild(editBtn);
@@ -2721,7 +3098,7 @@ export class Visual implements IVisual {
                         setCurrentSurface({ formatStyle: "rules" } as any);
                     }
                     basedOnField = "";
-                    basedOnSel.value = "";
+                    basedOnSel.setValue("");
                     rerender();
                 });
                 appliedRow.appendChild(remove);
@@ -2746,15 +3123,15 @@ export class Visual implements IVisual {
                         grid.appendChild(wrap);
                     };
 
-                    const emptySel = document.createElement("select");
-                    emptySel.className = "fm-cf-select";
-                    addOption(emptySel, "blank", "Blank (no color)");
-                    addOption(emptySel, "zero", "Treat as 0");
-                    emptySel.value = s.emptyValues;
-                    emptySel.addEventListener("change", () => {
-                        s.emptyValues = emptySel.value as any;
+                    const emptySel = createFancySelect("fm-cf-select");
+                    addOption(emptySel.select, "blank", "Blank (no color)");
+                    addOption(emptySel.select, "zero", "Treat as 0");
+                    emptySel.setValue(s.emptyValues);
+                    emptySel.syncFromSelect();
+                    emptySel.select.addEventListener("change", () => {
+                        s.emptyValues = emptySel.getValue() as any;
                     });
-                    mkStyleField("Empty values", emptySel);
+                    mkStyleField("Empty values", emptySel.host);
 
                     const mkBoundEditor = (name: "min" | "max") => {
                         const bound = name === "min" ? s.min : s.max;
@@ -2762,11 +3139,11 @@ export class Visual implements IVisual {
                         const row = document.createElement("div");
                         row.className = "fm-cf-style-bound";
 
-                        const typeSel = document.createElement("select");
-                        typeSel.className = "fm-cf-select";
-                        addOption(typeSel, "auto", "Auto");
-                        addOption(typeSel, "number", "Number");
-                        typeSel.value = bound.type;
+                        const typeSel = createFancySelect("fm-cf-select");
+                        addOption(typeSel.select, "auto", "Auto");
+                        addOption(typeSel.select, "number", "Number");
+                        typeSel.setValue(bound.type);
+                        typeSel.syncFromSelect();
 
                         const valInp = document.createElement("input");
                         valInp.className = "fm-cf-input";
@@ -2780,12 +3157,12 @@ export class Visual implements IVisual {
                         colInp.value = bound.color && /^#/.test(bound.color) ? bound.color : (name === "min" ? "#ffffff" : "#000000");
 
                         const syncEnabled = () => {
-                            valInp.disabled = typeSel.value !== "number";
+                            valInp.disabled = typeSel.getValue() !== "number";
                         };
                         syncEnabled();
 
-                        typeSel.addEventListener("change", () => {
-                            bound.type = typeSel.value as any;
+                        typeSel.select.addEventListener("change", () => {
+                            bound.type = typeSel.getValue() as any;
                             if (bound.type !== "number") bound.value = undefined;
                             syncEnabled();
                         });
@@ -2796,7 +3173,7 @@ export class Visual implements IVisual {
                             bound.color = colInp.value;
                         });
 
-                        row.appendChild(typeSel);
+                        row.appendChild(typeSel.host);
                         row.appendChild(valInp);
                         row.appendChild(colInp);
 
@@ -2935,8 +3312,13 @@ export class Visual implements IVisual {
     }
 
     private clearRoot(): void {
-        while (this.root.firstChild) {
-            this.root.removeChild(this.root.firstChild);
+        const children = Array.from(this.root.childNodes);
+        for (const n of children) {
+            const el = n as any;
+            if (el && el.nodeType === 1 && (el as HTMLElement).dataset?.fmPersist === "1") {
+                continue;
+            }
+            this.root.removeChild(n);
         }
     }
 
@@ -2948,6 +3330,166 @@ export class Visual implements IVisual {
         el.className = "fm-message";
         el.textContent = message;
         this.root.appendChild(el);
+    }
+
+    private renderEmptyState(viewport: powerbi.IViewport, ctx: { reason: "noDataView" | "missingBindings" | "filteredOut"; missingRow?: boolean; missingValues?: boolean }): void {
+        this.root.style.width = `${viewport.width}px`;
+        this.root.style.height = `${viewport.height}px`;
+        this.clearRoot();
+
+        const wrap = document.createElement("div");
+        wrap.className = "fm-empty";
+
+        const card = document.createElement("div");
+        card.className = "fm-empty-card";
+
+        const title = document.createElement("div");
+        title.className = "fm-empty-title";
+        title.textContent = "Financial Matrix Pro";
+        card.appendChild(title);
+
+        const sub = document.createElement("div");
+        sub.className = "fm-empty-sub";
+        if (ctx.reason === "noDataView" || (ctx.missingRow && ctx.missingValues)) {
+            sub.textContent = "Premium guide: follow the steps below.";
+        } else if (ctx.missingRow) {
+            sub.textContent = "Row is missing. Add at least one field to Row to start. This screen auto-hides when the visual is ready.";
+        } else if (ctx.missingValues) {
+            sub.textContent = "Values are missing. Add at least one measure to Values. This screen auto-hides when ready.";
+        } else {
+            sub.textContent = "No rows to display. Filters may have removed all data.";
+        }
+        card.appendChild(sub);
+
+        const accent = document.createElement("div");
+        accent.className = "fm-empty-accent";
+        card.appendChild(accent);
+
+        const scroll = document.createElement("div");
+        scroll.className = "fm-empty-scroll";
+
+        const addSection = (heading: string, lines: string[], ordered?: boolean) => {
+            const box = document.createElement("div");
+            box.className = "fm-empty-section";
+
+            const h = document.createElement("div");
+            h.className = "fm-empty-section-title";
+            h.textContent = heading;
+            box.appendChild(h);
+
+            const list = document.createElement(ordered ? "ol" : "ul");
+            list.className = "fm-empty-list";
+            for (const t of lines) {
+                const li = document.createElement("li");
+                li.textContent = t;
+                list.appendChild(li);
+            }
+            box.appendChild(list);
+            scroll.appendChild(box);
+        };
+
+        addSection(
+            "Quick start (recommended)",
+            [
+                "Row: add your main dimension(s) (Account, Segment, Product, etc.).",
+                "Values: add at least one numeric measure (Sales, Amount, Balance, etc.).",
+                "Column (optional): add one or more fields for multi-level column headers (Year > Month > …).",
+                "Presets: choose a preset for instant styling; then fine-tune Header / Rows / Totals.",
+                "Conditional Formatting: open editor to add Rules, Gradients, Field-value formatting, and Icons.",
+                "Custom Table (optional): enable it to define Parent/Child layout and control which values appear in each row."
+            ],
+            true
+        );
+
+        addSection(
+            "Fields (what goes where)",
+            [
+                "Row (required): creates the left-side hierarchy and row headers.",
+                "Values (required): measures shown as columns and cell values.",
+                "Column (optional): builds column grouping / hierarchy in the header.",
+                "Group (optional): lets you group rows for layout/format scenarios.",
+                "Format by fields (CF): bind fields you want to use in Conditional Formatting 'Based on field'.",
+                "Custom table value fields / values: dedicated bindings for Custom Table mapping (optional)."
+            ]
+        );
+
+        addSection(
+            "Presets (instant styling)",
+            [
+                "Presets are safe defaults for spacing, grid visibility, zebra rows, and premium look.",
+                "You can always switch to Custom for full control.",
+                "Header contrast remains readable across presets (dark header + light text)."
+            ]
+        );
+
+        addSection(
+            "Header & Column hierarchy",
+            [
+                "Enable Column hierarchy to show multi-level columns (e.g., Year > Month > Measure).",
+                "Use Freeze header to keep headers visible while scrolling.",
+                "Control font, alignment, and background from the Header card."
+            ]
+        );
+
+        addSection(
+            "Rows & hierarchy",
+            [
+                "Hierarchy view enables expand/collapse style behavior for parent/child rows.",
+                "Indent size + left padding control how deep levels are aligned.",
+                "Auto aggregate parents can roll-up child values into parent totals.",
+                "Blank as zero helps financial statements render consistently."
+            ]
+        );
+
+        addSection(
+            "Totals",
+            [
+                "Configure Grand totals, Subtotals, and Column totals from the Totals card.",
+                "Use grid options to visually separate totals from detail rows.",
+                "Combine with units/decimals settings for clean statement formatting."
+            ]
+        );
+
+        addSection(
+            "Conditional Formatting (CF)",
+            [
+                "Surfaces: apply formatting to Cells, Row headers, or Column headers.",
+                "Rules: apply background/font/icon when conditions match (>, <, between, contains, etc.).",
+                "Gradient: color scale across values for heatmap-style insight.",
+                "Field-value formatting: drive formatting using a 'Based on field' value.",
+                "Icons: show KPI icons (RAG, arrows, triangles, check/cross) based on thresholds."
+            ]
+        );
+
+        addSection(
+            "Custom Table (advanced layout)",
+            [
+                "Turn on Custom Table to design a statement layout (P&L / Balance Sheet) with custom Parent/Child rows.",
+                "Map each row to a bound field/measure (Values) and choose aggregation behavior.",
+                "Optionally hide selected column groups to keep the layout clean.",
+                "Use 'Show value names in columns' when you want value labels visible in headers."
+            ]
+        );
+
+        addSection(
+            "Troubleshooting",
+            [
+                "If the matrix is blank: check if filters removed all data, then test by removing filters.",
+                "If you see this guide: ensure at least one Row field and one measure in Values are bound.",
+                "If Custom Table is ON: ensure a measure is bound to Values (and configure mapping in the editor).",
+                "If formatting looks off: use 'Reset to default' in the format pane for a clean baseline."
+            ]
+        );
+
+        const tip = document.createElement("div");
+        tip.className = "fm-empty-tip";
+        tip.textContent = "";
+
+        scroll.appendChild(tip);
+        card.appendChild(scroll);
+
+        wrap.appendChild(card);
+        this.root.appendChild(wrap);
     }
 
     private render(model: Model, viewport: powerbi.IViewport): void {
@@ -3014,6 +3556,15 @@ export class Visual implements IVisual {
         // Presets are lightweight: they only tweak sizing/toggles (no hard-coded new colors)
         const preset = (tablePreset || "custom").toLowerCase();
 
+        // Apply a theme class at the container level so editor overlays also match the selected preset.
+        const themeKey = (() => {
+            if (preset.startsWith("financeblue")) return "financeblue";
+            if (preset.startsWith("financepurple")) return "financepurple";
+            if (preset.startsWith("financeemerald")) return "financeemerald";
+            return "";
+        })();
+        this.root.className = themeKey ? `fm-container fm-theme-${themeKey}` : "fm-container";
+
         const cfCard: any = (this.formattingSettings as any).conditionalFormatting;
         const cfEnabled = (cfCard?.enabled?.value as boolean | undefined) ?? false;
         const cfConfig = cfEnabled ? this.safeParseCfConfig(this.cfRulesJson) : { version: 1 as const, rules: [] as CFRule[] };
@@ -3059,6 +3610,14 @@ export class Visual implements IVisual {
             clean: { showGrid: true, zebra: false, horizontalGrid: true, verticalGrid: true, horizontalGridThickness: 1, verticalGridThickness: 1, horizontalGridStyle: "solid", verticalGridStyle: "solid" },
             compact: { showGrid: true, zebra: false, horizontalGrid: true, verticalGrid: false, horizontalGridThickness: 1, horizontalGridStyle: "solid" },
             softzebra: { showGrid: false, zebra: true, horizontalGrid: false, verticalGrid: false },
+
+            // Modern attractive finance themes
+            financeblue: { showGrid: false, zebra: false, horizontalGrid: false, verticalGrid: false },
+            financebluezebra: { showGrid: false, zebra: true, horizontalGrid: false, verticalGrid: false },
+            financepurple: { showGrid: false, zebra: false, horizontalGrid: false, verticalGrid: false },
+            financepurplezebra: { showGrid: false, zebra: true, horizontalGrid: false, verticalGrid: false },
+            financeemerald: { showGrid: false, zebra: false, horizontalGrid: false, verticalGrid: false },
+            financeemeraldzebra: { showGrid: false, zebra: true, horizontalGrid: false, verticalGrid: false },
 
             // preset pack
             minimal: { showGrid: false, zebra: false, horizontalGrid: false, verticalGrid: false },
@@ -3379,6 +3938,9 @@ export class Visual implements IVisual {
         const gridHClass = showGrid && effHorizontalGrid && effHorizontalThickness > 0 ? "fm-grid-h" : "";
         const gridVClass = showGrid && effVerticalGrid && effVerticalThickness > 0 ? "fm-grid-v" : "";
         table.className = `fm-table ${presetClass} ${showGrid ? "fm-grid" : ""} ${gridHClass} ${gridVClass} ${isManualWidth ? "fm-width-manual" : ""} ${(freezeHeader || freezeRowHeaders) ? "fm-freeze" : ""} ${wrapText ? "fm-wrap" : ""}`;
+        if (this.activeSelectionKeys && this.activeSelectionKeys.size > 0) {
+            table.classList.add("fm-has-selection");
+        }
 
         const defaultGridColor = "var(--fm-grid-color, rgba(0, 0, 0, 0.12))";
         if (showGrid && effHorizontalGrid && effHorizontalThickness > 0) {
@@ -3718,11 +4280,20 @@ export class Visual implements IVisual {
         const tbody = document.createElement("tbody");
         let zebraIndex = 0;
 
+        const tooltipMeasures = Array.isArray(model.tooltipMeasureNames) ? model.tooltipMeasureNames : [];
+
         for (const r of visibleRows) {
             const isParent = r.children.length > 0;
             const hasToggle = isParent && r.type !== "blank";
             const isCollapsed = this.collapsed.has(r.code);
             const indentPx = hierarchyView ? (r.depth * indentSize) : (model.rowFieldCount > 1 ? 0 : (r.depth * indentSize));
+
+            const rowSelectionId = model.rowSelectionIdByCode?.get(r.code) ?? null;
+            const rowSelectionKey = rowSelectionId && typeof (rowSelectionId as any).getKey === "function"
+                ? (rowSelectionId as any).getKey()
+                : "";
+            const hasSelection = !!this.activeSelectionKeys && this.activeSelectionKeys.size > 0;
+            const isSelected = hasSelection && !!rowSelectionKey && this.activeSelectionKeys.has(rowSelectionKey);
 
             const isGrand = r.code === "__grand_total";
             const isSub = r.code.endsWith("||__subtotal");
@@ -3732,6 +4303,10 @@ export class Visual implements IVisual {
             const tr = document.createElement("tr");
             tr.className = `fm-tr ${showGrid ? "fm-grid" : ""}`;
             tr.dataset.code = r.code;
+            if (hasSelection && r.type !== "blank") {
+                if (isSelected) tr.classList.add("fm-row-selected");
+                else tr.classList.add("fm-row-dim");
+            }
             if (!wrapText) tr.style.height = `${rowHeight}px`;
             else tr.style.minHeight = `${rowHeight}px`;
             if (r.isTotal) {
@@ -3773,6 +4348,34 @@ export class Visual implements IVisual {
             for (let h = 0; h < model.rowHeaderColumns.length; h++) {
                 const td = document.createElement("td");
                 td.className = "fm-td fm-td-row";
+
+                // Make the entire row-header area clickable to pass filter context.
+                if (rowSelectionId && r.type !== "blank" && !r.isTotal) {
+                    td.style.cursor = "pointer";
+                    const onPointerDown = (ev: PointerEvent) => {
+                        // Left click / primary pointer only
+                        if ((ev as any).button != null && (ev as any).button !== 0) return;
+                        const target = ev.target as HTMLElement | null;
+                        if (target && target.closest(".fm-toggle")) return;
+                        this.selectRow(rowSelectionId, false);
+                    };
+                    // Capture-phase to avoid host/inner handlers swallowing the click.
+                    td.addEventListener("pointerdown", onPointerDown as any, true);
+
+                    td.addEventListener("click", (ev) => {
+                        const target = ev.target as HTMLElement | null;
+                        if (target && target.closest(".fm-toggle")) return;
+                        this.selectRow(rowSelectionId, false);
+                    });
+                    td.addEventListener("contextmenu", (ev) => {
+                        ev.preventDefault();
+                        try {
+                            (this.selectionManager as any).showContextMenu(rowSelectionId, { x: ev.clientX, y: ev.clientY });
+                        } catch {
+                            // ignore context menu errors
+                        }
+                    });
+                }
                 if (r.isTotal) {
                     const isGrand = r.code === "__grand_total";
                     const isSub = r.code.endsWith("||__subtotal");
@@ -3852,6 +4455,37 @@ export class Visual implements IVisual {
                     label.style.marginLeft = `${indentPx}px`;
                     label.textContent = r.type === "blank" ? "" : r.label;
                     rowCell.appendChild(label);
+
+                    // Tooltip + drill-through context menu on row header.
+                    if (rowSelectionId && r.type !== "blank" && !r.isTotal) {
+                        td.addEventListener("click", (ev) => {
+                            const target = ev.target as HTMLElement | null;
+                            if (target && target.closest(".fm-toggle")) return;
+                            this.selectRow(rowSelectionId, false);
+                        });
+                        td.addEventListener("contextmenu", (ev) => {
+                            ev.preventDefault();
+                            try {
+                                (this.selectionManager as any).showContextMenu(rowSelectionId, { x: ev.clientX, y: ev.clientY });
+                            } catch {
+                                // ignore context menu errors
+                            }
+                        });
+                    }
+
+                    if (r.type !== "blank") {
+                        td.addEventListener("mouseenter", (ev) => {
+                            const items = buildMatrixTooltipItems({ rowLabel: r.label });
+                            this.showTooltip(ev as MouseEvent, items, rowSelectionId);
+                        });
+                        td.addEventListener("mousemove", (ev) => {
+                            const items = buildMatrixTooltipItems({ rowLabel: r.label });
+                            this.showTooltip(ev as MouseEvent, items, rowSelectionId);
+                        });
+                        td.addEventListener("mouseleave", () => {
+                            this.hideTooltip(true);
+                        });
+                    }
 
                     if (cfEnabled) {
                         const bgStyle = this.evalCfRules(cfConfig, {
@@ -3968,6 +4602,12 @@ export class Visual implements IVisual {
             for (const col of model.columns) {
                 const td = document.createElement("td");
                 td.className = "fm-td fm-td-num";
+                if (rowSelectionId && r.type !== "blank" && !r.isTotal) {
+                    td.style.cursor = "pointer";
+                    td.addEventListener("click", () => {
+                        this.selectRow(rowSelectionId, false);
+                    });
+                }
                 if (r.isTotal) {
                     const isGrand = r.code === "__grand_total";
                     const isSub = r.code.endsWith("||__subtotal");
@@ -4007,6 +4647,54 @@ export class Visual implements IVisual {
                 const scale = unitScaleByCol.get(col.key) ?? 1;
                 const text = r.type === "blank" ? "" : (units === "auto" ? this.formatAutoNumber(v) : this.formatNumber(v, decimals, scale));
                 td.textContent = text;
+
+                // Tooltip + drill-through context menu on value cells.
+                if (r.type !== "blank") {
+                    const colLabel = [...(col.columnLevels || []), col.leafLabel].filter(p => !!p).join(" ");
+                    const levelsKey = (col.columnLevels || []).join("||");
+                    const getExtra = () => {
+                        const extra: Array<{ name: string; value: unknown }> = [];
+                        if (!tooltipMeasures.length) return extra;
+                        for (const name of tooltipMeasures) {
+                            const rawAny = model.cfFieldRaw.get(`${r.code}||${levelsKey}||${name}`);
+                            extra.push({ name, value: rawAny });
+                        }
+                        return extra;
+                    };
+
+                    td.addEventListener("mouseenter", (ev) => {
+                        const items = buildMatrixTooltipItems({
+                            rowLabel: r.label,
+                            columnLabel: colLabel,
+                            valueText: text,
+                            extra: getExtra()
+                        });
+                        this.showTooltip(ev as MouseEvent, items, rowSelectionId);
+                    });
+                    td.addEventListener("mousemove", (ev) => {
+                        const items = buildMatrixTooltipItems({
+                            rowLabel: r.label,
+                            columnLabel: colLabel,
+                            valueText: text,
+                            extra: getExtra()
+                        });
+                        this.showTooltip(ev as MouseEvent, items, rowSelectionId);
+                    });
+                    td.addEventListener("mouseleave", () => {
+                        this.hideTooltip(true);
+                    });
+
+                    if (rowSelectionId && !r.isTotal) {
+                        td.addEventListener("contextmenu", (ev) => {
+                            ev.preventDefault();
+                            try {
+                                (this.selectionManager as any).showContextMenu(rowSelectionId, { x: ev.clientX, y: ev.clientY });
+                            } catch {
+                                // ignore context menu errors
+                            }
+                        });
+                    }
+                }
 
                 if (cfEnabled) {
                     const colText = [...(col.columnLevels || []), col.leafLabel].filter(p => !!p).join(" ");
@@ -4538,10 +5226,7 @@ export class Visual implements IVisual {
 
     private formatColumnLeafLabel(col: Pick<BucketedColumnKey, "bucket" | "key"> & Partial<Pick<BucketedColumnKey, "measure">>): string {
         const suffix = col.measure || col.key;
-        // No need to prefix with "Values:". Keep a light prefix only for non-values buckets.
-        if (col.bucket === "values") return suffix;
-        const bucketLabel = col.bucket === "plan" ? "Plan" : "Forecast";
-        return `${bucketLabel} ${suffix}`;
+        return suffix;
     }
 
     private computeUnitScale(units: DisplayUnit, model: Model, visibleRows: RowNode[], colKey: string): number {
@@ -4673,16 +5358,14 @@ export class Visual implements IVisual {
 
         const pickBucket = (v: powerbi.DataViewValueColumn): ColumnBucket | null => {
             const roles: any = v?.source?.roles || {};
-            if (roles.values) return "values";
-            if (roles.plan) return "plan";
-            if (roles.forecast) return "forecast";
+            if (roles.values || roles.customTableValue || roles.formatBy) return "values";
             return null;
         };
 
         const getMeasureDisplayName = (v: powerbi.DataViewValueColumn) => (v.source?.displayName || v.source?.queryName || "Value");
 
         const columns: BucketedColumnKey[] = [];
-        const orderedBuckets: ColumnBucket[] = ["values", "plan", "forecast"];
+        const orderedBuckets: ColumnBucket[] = ["values"];
         const columnsByKey = new Map<string, BucketedColumnKey>();
 
         const makeLevels = (colLevels: string[], leaf: string): string[] => {
@@ -4723,6 +5406,16 @@ export class Visual implements IVisual {
         const cfFieldRaw = new Map<string, any>();
         const rowFieldRaw = new Map<string, Map<string, any>>();
         const colFieldRaw = new Map<string, Map<string, any>>();
+        const rowSelectionIdByCode = new Map<string, powerbi.extensibility.ISelectionId>();
+
+        const tooltipMeasureSet = new Set<string>();
+        for (const v of values) {
+            const roles: any = v?.source?.roles || {};
+            if (roles.tooltips) {
+                tooltipMeasureSet.add(getMeasureDisplayName(v));
+            }
+        }
+        const tooltipMeasureNames = Array.from(tooltipMeasureSet.values());
         const dataLabelByCode = new Map<string, string>();
         const dataParentByCode = new Map<string, string | null>();
         const dataRowLevelByCode = new Map<string, number>();
@@ -4801,6 +5494,20 @@ export class Visual implements IVisual {
             const leafCode = rowLevels.join("||");
             const colLevels = getColumnLevels(i);
 
+            // Create selection ids for each row level (prefix) so clicking parent/leaf rows filters correctly.
+            try {
+                for (let lvl = 0; lvl < rowCats.length; lvl++) {
+                    const catCol = rowCats[lvl];
+                    const code = rowLevels.slice(0, lvl + 1).join("||");
+                    if (!catCol || !code) continue;
+                    if (rowSelectionIdByCode.has(code)) continue;
+                    const sid = this.host.createSelectionIdBuilder().withCategory(catCol, i).createSelectionId();
+                    rowSelectionIdByCode.set(code, sid);
+                }
+            } catch {
+                // ignore selection id issues
+            }
+
             // Store raw bound grouping/category values for this row.
             for (let ri = 0; ri < rowCats.length; ri++) {
                 const fieldName = rowCats[ri]?.source?.displayName || rowCats[ri]?.source?.queryName || "";
@@ -4878,9 +5585,8 @@ export class Visual implements IVisual {
                 if (!name) continue;
                 const roles: any = src?.roles || {};
                 // Only store measures.
-                if (!src?.isMeasure && !(roles.values || roles.plan || roles.forecast || roles.formatBy)) continue;
-                const label = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
-                addCfMeasureRaw(leafCode, colLevels, label, v.values[i]);
+                if (!src?.isMeasure && !(roles.values || roles.customTableValue || roles.formatBy || roles.tooltips)) continue;
+                addCfMeasureRaw(leafCode, colLevels, name, v.values[i]);
             }
 
             // Optional (currently unused) metadata buckets
@@ -5335,7 +6041,9 @@ export class Visual implements IVisual {
             rowHeaderColumns,
             hasGroup,
             rowFieldCount: effectiveRowFieldCount,
-            showColumnTotal
+            showColumnTotal,
+            tooltipMeasureNames,
+            rowSelectionIdByCode
         };
     }
 
@@ -5397,7 +6105,7 @@ export class Visual implements IVisual {
             const name = String((src?.displayName || src?.queryName || "")).trim();
             if (!name) continue;
             const roles: any = src?.roles || {};
-            const label = roles.plan ? `Plan ${name}` : (roles.forecast ? `Forecast ${name}` : name);
+            const label = name;
             if (!measureByLabel.has(label)) measureByLabel.set(label, v);
         }
 

@@ -6,12 +6,76 @@
   position: relative;
   isolation: isolate;
   box-sizing: border-box;
+
+  /* FinanceTheme tokens (modern, calm, enterprise-safe) */
+  --fm-page-bg: #F8FAFC;
+  --fm-surface: #FFFFFF;
+  --fm-surface-alt: #F9FAFB;
+  --fm-header-surface: #F1F5F9;
+  --fm-border: #E5E7EB;
+
+  --fm-text-primary: #111827;
+  --fm-text-secondary: #6B7280;
+  --fm-text-muted: #9CA3AF;
+
+  --fm-accent: #2563EB;
+  --fm-accent-soft: rgba(37, 99, 235, 0.06);
+  --fm-accent-soft-strong: rgba(37, 99, 235, 0.08);
+
+  --fm-positive: #16A34A;
+  --fm-positive-soft: rgba(22, 163, 74, 0.08);
+  --fm-negative: #DC2626;
+  --fm-negative-soft: rgba(220, 38, 38, 0.08);
+  --fm-warning: #F59E0B;
+
+  /* Editor / CF popup theme (Modern Blue SaaS default) */
+  --fm-editor-bg: #F4F7FB;
+  --fm-editor-card-bg: #FFFFFF;
+  --fm-editor-divider: #E5E7EB;
+  --fm-editor-header-bg: #EEF2FF;
+  --fm-editor-header-text: #1E40AF;
+  --fm-editor-accent: #2563EB;
+  --fm-editor-text-primary: #0F172A;
+  --fm-editor-text-secondary: #475569;
+  --fm-editor-placeholder: #94A3B8;
+  --fm-editor-input-bg: #F8FAFF;
+  --fm-editor-input-border: #CBD5E1;
+  --fm-editor-input-focus: #2563EB;
+  --fm-editor-input-focus-shadow: rgba(37, 99, 235, 0.25);
+  --fm-editor-btn-primary: #2563EB;
+  --fm-editor-btn-primary-hover: #1D4ED8;
+  --fm-editor-btn-secondary: #E5E7EB;
+  --fm-editor-btn-secondary-text: #374151;
+  --fm-editor-dropdown-hover: #E0E7FF;
+  --fm-editor-card-hover-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --fm-editor-transition: 120ms;
+
+  background: var(--fm-page-bg);
+  color: var(--fm-text-primary);
+}
+
+/* Landing hint (advancedPieChart-style overlay) */
+.fm-landing {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  right: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  background: var(--fm-editor-panel-bg, rgba(255,255,255,0.92));
+  border: 1px solid var(--fm-editor-border, rgba(13,110,253,0.18));
+  color: var(--fm-editor-text, #1f2533);
+  box-sizing: border-box;
+  z-index: 5;
 }
 
 .fm-message {
   padding: 10px;
   font-family: Segoe UI, sans-serif;
   font-size: 12px;
+  color: var(--fm-text-primary);
 }
 
 .fm-table {
@@ -24,19 +88,28 @@
   border-radius: var(--fm-table-radius, 0px);
   overflow: hidden;
 
-  /* preset variables (neutral palette) */
+  /* preset variables (default to FinanceTheme) */
   --fm-cell-py: 4px;
   --fm-cell-px: 8px;
-  --fm-zebra-bg: rgba(0, 0, 0, 0.04);
-  --fm-grid-color: rgba(0, 0, 0, 0.12);
-  --fm-header-bg: transparent;
+  --fm-zebra-bg: var(--fm-surface-alt);
+  --fm-grid-color: var(--fm-border);
+  --fm-header-bg: var(--fm-header-surface);
+  /* Strong header defaults: applied for ALL presets unless explicitly overridden */
+  --fm-header-bg-strong: var(--fm-accent);
+  --fm-header-text-strong: #FFFFFF;
   --fm-header-weight: 600;
-  --fm-toggle-border: rgba(0, 0, 0, 0.25);
+  --fm-toggle-border: var(--fm-border);
   --fm-toggle-bg: transparent;
   --fm-toggle-radius: 0px;
   --fm-header-underline: none;
   --fm-table-border: none;
   --fm-table-radius: 0px;
+
+  background: var(--fm-surface);
+}
+
+.fm-table tbody tr {
+  transition: background 120ms ease, filter 120ms ease, transform 120ms ease;
 }
 
 /* Sticky headers/columns can be unreliable with border-collapse: collapse in some WebView/table layouts.
@@ -59,6 +132,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--fm-text-primary);
 }
 
 .fm-table.fm-wrap .fm-th,
@@ -118,10 +192,174 @@
   min-width: 0;
 }
 
+/* Header row background can be a gradient; apply on the row for a continuous bar */
+.fm-header {
+  background: var(--fm-header-bg-strong, var(--fm-header-bg, transparent));
+  color: var(--fm-header-text-strong, var(--fm-header-text, var(--fm-text-muted)));
+}
+
 .fm-header .fm-th {
   font-weight: var(--fm-header-weight, 600);
-  background: var(--fm-header-bg, transparent);
+  background: transparent;
   box-shadow: var(--fm-header-underline, none);
+  color: inherit;
+}
+
+/* Default hover (premium presets below are more specific and remain intact) */
+.fm-table tbody tr:hover {
+  background: var(--fm-row-hover-bg, #F3F4F6);
+  filter: drop-shadow(var(--fm-row-hover-shadow, 0 0 0 rgba(0, 0, 0, 0)));
+  transform: translateY(var(--fm-row-hover-translate, 0px));
+}
+
+/* Selection feedback (click-to-filter) */
+.fm-table.fm-has-selection tbody tr.fm-row-dim td {
+  /* Overlay tint that works even with inline backgrounds */
+  box-shadow: inset 0 0 0 9999px var(--fm-accent-soft);
+}
+
+.fm-table.fm-has-selection tbody tr.fm-row-selected {
+  outline: 2px solid var(--fm-accent);
+  outline-offset: -2px;
+}
+
+.fm-table.fm-has-selection tbody tr.fm-row-selected td {
+  box-shadow: inset 0 0 0 9999px var(--fm-accent-soft-strong);
+}
+
+.fm-table.fm-has-selection tbody tr.fm-row-selected td.fm-td-row {
+  /* Stronger “selected row” feel on the row header */
+  box-shadow: inset 3px 0 0 var(--fm-accent), inset 0 0 0 9999px var(--fm-accent-soft-strong);
+}
+
+/* Modern attractive finance themes (tokens applied at container level so editors match too) */
+.fm-container.fm-theme-financeblue {
+  --fm-page-bg: #F5F7FB;
+  --fm-surface: #FFFFFF;
+  --fm-surface-alt: #F0F4FF;
+  --fm-border: #E5E7EB;
+
+  --fm-text-primary: #0F172A;
+  --fm-text-secondary: #475569;
+  --fm-text-muted: #475569;
+
+  --fm-accent: #2563EB;
+  --fm-accent-soft: rgba(37, 99, 235, 0.12);
+  --fm-accent-soft-strong: rgba(37, 99, 235, 0.18);
+
+  --fm-positive: #22C55E;
+  --fm-negative: #EF4444;
+
+  --fm-header-bg: linear-gradient(90deg, #1E3A8A, #1D4ED8);
+  --fm-header-text: #FFFFFF;
+
+  --fm-row-hover-bg: rgba(37, 99, 235, 0.12);
+  --fm-row-hover-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  --fm-row-hover-translate: -1px;
+
+  /* Keep editor aligned with Modern Blue SaaS */
+  --fm-editor-bg: #F4F7FB;
+  --fm-editor-header-bg: #EEF2FF;
+  --fm-editor-header-text: #1E40AF;
+  --fm-editor-accent: #2563EB;
+  --fm-editor-input-focus: #2563EB;
+  --fm-editor-input-focus-shadow: rgba(37, 99, 235, 0.25);
+  --fm-editor-btn-primary: #2563EB;
+  --fm-editor-btn-primary-hover: #1D4ED8;
+}
+
+.fm-container.fm-theme-financepurple {
+  --fm-page-bg: #F8FAFF;
+  --fm-surface: #FFFFFF;
+  --fm-surface-alt: #EEF2FF;
+  --fm-border: #E5E7EB;
+
+  --fm-text-primary: #111827;
+  --fm-text-secondary: #6B7280;
+  --fm-text-muted: #6B7280;
+
+  --fm-accent: #6366F1;
+  --fm-accent-soft: rgba(99, 102, 241, 0.14);
+  --fm-accent-soft-strong: rgba(99, 102, 241, 0.18);
+
+  --fm-positive: #22C55E;
+  --fm-negative: #EF4444;
+
+  --fm-header-bg: linear-gradient(90deg, #6366F1, #8B5CF6);
+  --fm-header-text: #FFFFFF;
+
+  --fm-row-hover-bg: rgba(99, 102, 241, 0.14);
+  --fm-row-hover-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  --fm-row-hover-translate: -1px;
+
+  /* Optional: Purple Fintech editor flavor when purple theme is active */
+  --fm-editor-bg: #F7F7FF;
+  --fm-editor-header-bg: #F3E8FF;
+  --fm-editor-header-text: #5B21B6;
+  --fm-editor-accent: #7C3AED;
+  --fm-editor-input-focus: #7C3AED;
+  --fm-editor-input-focus-shadow: rgba(124, 58, 237, 0.25);
+  --fm-editor-btn-primary: #7C3AED;
+  --fm-editor-btn-primary-hover: #6D28D9;
+  --fm-editor-dropdown-hover: #EDE9FE;
+}
+
+.fm-container.fm-theme-financeemerald {
+  --fm-page-bg: #F6FFFA;
+  --fm-surface: #FFFFFF;
+  --fm-surface-alt: #ECFDF5;
+  --fm-border: #E5E7EB;
+
+  --fm-text-primary: #0F172A;
+  --fm-text-secondary: #475569;
+  --fm-text-muted: #475569;
+
+  --fm-accent: #10B981;
+  --fm-accent-soft: rgba(16, 185, 129, 0.14);
+  --fm-accent-soft-strong: rgba(16, 185, 129, 0.18);
+
+  --fm-positive: #16A34A;
+  --fm-negative: #DC2626;
+
+  --fm-header-bg: linear-gradient(90deg, #059669, #10B981);
+  --fm-header-text: #FFFFFF;
+
+  --fm-row-hover-bg: rgba(16, 185, 129, 0.14);
+  --fm-row-hover-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  --fm-row-hover-translate: -1px;
+
+  /* Optional: Emerald / Teal editor flavor when emerald theme is active */
+  --fm-editor-bg: #F0FDFA;
+  --fm-editor-header-bg: #CCFBF1;
+  --fm-editor-header-text: #065F46;
+  --fm-editor-accent: #10B981;
+  --fm-editor-input-focus: #10B981;
+  --fm-editor-input-focus-shadow: rgba(16, 185, 129, 0.25);
+  --fm-editor-btn-primary: #10B981;
+  --fm-editor-btn-primary-hover: #059669;
+  --fm-editor-dropdown-hover: #99F6E4;
+}
+
+/* Tie preset names to theme tokens */
+.fm-table.fm-preset-financeblue,
+.fm-table.fm-preset-financebluezebra {
+  --fm-header-weight: 600;
+  --fm-grid-color: var(--fm-border);
+  --fm-zebra-bg: var(--fm-surface-alt);
+}
+
+.fm-table.fm-preset-financepurple,
+.fm-table.fm-preset-financepurplezebra {
+  --fm-header-weight: 600;
+  --fm-grid-color: var(--fm-border);
+  --fm-zebra-bg: var(--fm-surface-alt);
+}
+
+.fm-table.fm-preset-financeemerald,
+.fm-table.fm-preset-financeemeraldzebra {
+  --fm-header-weight: 600;
+  --fm-grid-color: var(--fm-border);
+  --fm-zebra-bg: var(--fm-surface-alt);
 }
 
 .fm-grid-h .fm-th,
@@ -174,7 +412,7 @@
   position: absolute;
   inset: 0;
   z-index: 200;
-  background: rgba(0, 0, 0, 0.08);
+  background: rgba(17, 24, 39, 0.10);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -184,13 +422,14 @@
   width: min(980px, calc(100% - 24px));
   max-height: calc(100% - 24px);
   overflow: auto;
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 8px;
+  background: var(--fm-editor-bg);
+  border: 1px solid var(--fm-editor-divider);
+  border-radius: 12px;
   padding: 12px;
   font-family: Segoe UI, sans-serif;
   font-size: 12px;
   box-sizing: border-box;
+  color: var(--fm-editor-text-primary);
 }
 
 /* Custom Table editor: full-size panel */
@@ -198,6 +437,24 @@
   width: calc(100% - 24px);
   height: calc(100% - 24px);
   max-height: none;
+}
+
+.fm-ct-panel .fm-cf-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--fm-editor-bg);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--fm-editor-divider);
+}
+
+.fm-ct-panel .fm-cf-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--fm-editor-bg);
+  padding-top: 10px;
+  border-top: 1px solid var(--fm-editor-divider);
 }
 
 .fm-cf-header {
@@ -213,15 +470,17 @@
 
 .fm-cf-tab {
   padding: 6px 10px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: 6px;
+  border: 1px solid var(--fm-editor-input-border);
+  background: var(--fm-editor-input-bg);
+  border-radius: 10px;
   cursor: pointer;
+  color: var(--fm-editor-text-primary);
+  transition: background var(--fm-editor-transition) ease, border-color var(--fm-editor-transition) ease, box-shadow var(--fm-editor-transition) ease;
 }
 
 .fm-cf-tab-active {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.22);
+  background: var(--fm-editor-header-bg);
+  border-color: var(--fm-editor-accent);
 }
 
 .fm-cf-title {
@@ -242,14 +501,135 @@
 
 .fm-cf-label {
   font-size: 11px;
-  color: rgba(0, 0, 0, 0.70);
+  color: var(--fm-editor-text-secondary);
 }
 
-.fm-cf-select {
+/* Native select fallback (should be rare now) */
+select.fm-cf-select {
   width: 100%;
   box-sizing: border-box;
   font-size: 12px;
   padding: 4px 6px;
+  border: 1px solid var(--fm-editor-input-border);
+  border-radius: 10px;
+  background: var(--fm-editor-input-bg);
+  color: var(--fm-editor-text-primary);
+  transition: background var(--fm-editor-transition) ease, border-color var(--fm-editor-transition) ease, box-shadow var(--fm-editor-transition) ease;
+}
+
+/* Custom dropdown (used to avoid native grey option popups) */
+.fm-dd {
+  position: relative;
+}
+
+.fm-dd-native {
+  display: none;
+}
+
+.fm-dd.fm-cf-select {
+  width: 100%;
+}
+
+.fm-dd.fm-cf-select .fm-dd-btn {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12px;
+  padding: 4px 28px 4px 6px;
+  border: 1px solid var(--fm-editor-input-border);
+  border-radius: 10px;
+  background: var(--fm-editor-input-bg);
+  color: var(--fm-editor-text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fm-editor-transition) ease, border-color var(--fm-editor-transition) ease, box-shadow var(--fm-editor-transition) ease;
+}
+
+.fm-dd.fm-cf-select .fm-dd-btn:hover {
+  background: var(--fm-editor-dropdown-hover);
+}
+
+.fm-dd.fm-cf-select .fm-dd-btn:focus {
+  outline: none;
+  border-color: var(--fm-editor-input-focus);
+  box-shadow: 0 0 0 3px var(--fm-editor-input-focus-shadow);
+}
+
+.fm-dd.fm-cf-select .fm-dd-btn::after {
+  content: "▾";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fm-editor-text-secondary);
+  pointer-events: none;
+}
+
+.fm-dd.fm-cf-select .fm-dd-menu {
+  position: absolute;
+  z-index: 1000;
+  left: 0;
+  right: 0;
+  margin-top: 6px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--fm-editor-input-border);
+  background: var(--fm-editor-card-bg);
+  box-shadow: var(--fm-editor-card-hover-shadow);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.fm-dd.fm-cf-select .fm-dd-item {
+  width: 100%;
+  display: block;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fm-editor-text-primary);
+  cursor: pointer;
+}
+
+.fm-dd.fm-cf-select .fm-dd-item:hover {
+  background: var(--fm-editor-dropdown-hover);
+}
+
+.fm-dd.fm-cf-select .fm-dd-item-selected {
+  background: var(--fm-editor-accent);
+  color: #FFFFFF;
+}
+
+.fm-dd.fm-cf-select.fm-dd-disabled .fm-dd-btn {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* Dropdown menu (native) styling: support varies by WebView */
+select.fm-cf-select option {
+  background: var(--fm-editor-input-bg);
+  color: var(--fm-editor-text-primary);
+}
+
+select.fm-cf-select option:checked {
+  background: var(--fm-editor-accent);
+  color: #FFFFFF;
+}
+
+select.fm-cf-select option:hover,
+select.fm-cf-select option:active {
+  background: var(--fm-editor-dropdown-hover);
+  color: var(--fm-editor-text-primary);
+}
+
+select.fm-cf-select:hover {
+  background: var(--fm-editor-dropdown-hover);
+}
+
+select.fm-cf-select:focus {
+  outline: none;
+  border-color: var(--fm-editor-input-focus);
+  box-shadow: 0 0 0 3px var(--fm-editor-input-focus-shadow);
 }
 
 .fm-cf-list {
@@ -263,7 +643,12 @@
 }
 
 .fm-cf-style-title {
-  font-weight: 600;
+  font-weight: 700;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--fm-editor-header-bg);
+  color: var(--fm-editor-header-text);
+  border-left: 3px solid var(--fm-editor-accent);
 }
 
 .fm-cf-style-grid {
@@ -286,7 +671,7 @@
 }
 
 .fm-cf-style-note {
-  color: rgba(0, 0, 0, 0.70);
+  color: var(--fm-editor-text-secondary);
 }
 
 .fm-cf-rule {
@@ -295,10 +680,16 @@
   gap: 8px;
   align-items: center;
   padding: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid var(--fm-editor-divider);
+  border-radius: 12px;
+  background: var(--fm-editor-card-bg);
   box-sizing: border-box;
+  transition: box-shadow var(--fm-editor-transition) ease, transform var(--fm-editor-transition) ease;
+}
+
+.fm-cf-rule:hover {
+  box-shadow: var(--fm-editor-card-hover-shadow);
+  transform: translateY(-1px);
 }
 
 .fm-cf-sentence {
@@ -313,31 +704,51 @@
 }
 
 .fm-cf-text {
-  color: rgba(0, 0, 0, 0.80);
+  color: var(--fm-editor-text-primary);
 }
 
 .fm-cf-input {
   width: 140px;
   box-sizing: border-box;
   font-size: 12px;
+  height: 28px;
   padding: 4px 6px;
+  border: 1px solid var(--fm-editor-input-border);
+  border-radius: 10px;
+  background: var(--fm-editor-input-bg);
+  color: var(--fm-editor-text-primary);
+  transition: border-color var(--fm-editor-transition) ease, box-shadow var(--fm-editor-transition) ease;
+}
+
+.fm-cf-input:focus {
+  outline: none;
+  border-color: var(--fm-editor-input-focus);
+  box-shadow: 0 0 0 3px var(--fm-editor-input-focus-shadow);
 }
 
 .fm-cf-color {
   width: 44px;
   height: 28px;
   padding: 0;
-  border: 1px solid rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--fm-editor-input-border);
+  border-radius: 10px;
   background: transparent;
 }
 
 .fm-cf-iconbtn {
   width: 28px;
   height: 28px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: 6px;
+  border: 1px solid var(--fm-editor-btn-primary);
+  background: var(--fm-editor-btn-primary);
+  border-radius: 10px;
   cursor: pointer;
+  color: #FFFFFF;
+  transition: background var(--fm-editor-transition) ease, border-color var(--fm-editor-transition) ease;
+}
+
+.fm-cf-iconbtn:hover {
+  border-color: var(--fm-editor-btn-primary-hover);
+  background: var(--fm-editor-btn-primary-hover);
 }
 
 .fm-cf-iconbtn:disabled {
@@ -354,41 +765,80 @@
 
 .fm-cf-btn {
   padding: 6px 10px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: 6px;
+  border: 1px solid var(--fm-editor-btn-primary);
+  background: var(--fm-editor-btn-primary);
+  border-radius: 12px;
   cursor: pointer;
+  color: #FFFFFF;
+  transition: background var(--fm-editor-transition) ease, border-color var(--fm-editor-transition) ease, transform var(--fm-editor-transition) ease;
+}
+
+.fm-cf-btn:hover {
+  background: var(--fm-editor-btn-primary-hover);
+  border-color: var(--fm-editor-btn-primary-hover);
+  transform: translateY(-1px);
 }
 
 .fm-cf-btn-primary {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.22);
+  background: var(--fm-editor-btn-primary);
+  border-color: var(--fm-editor-btn-primary);
+  color: #FFFFFF;
+}
+
+.fm-cf-btn-primary:hover {
+  background: var(--fm-editor-btn-primary-hover);
+  border-color: var(--fm-editor-btn-primary-hover);
 }
 
 /* Custom Table editor (reuses CF popup shell) */
 .fm-ct-section {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-top: 12px;
 }
 
 .fm-ct-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+}
+
+.fm-ct-card {
+  padding: 10px;
+  border: 1px solid var(--fm-editor-divider);
+  border-radius: 12px;
+  background: var(--fm-editor-card-bg);
+  box-sizing: border-box;
+  transition: box-shadow var(--fm-editor-transition) ease, transform var(--fm-editor-transition) ease;
+}
+
+.fm-ct-card:hover {
+  box-shadow: var(--fm-editor-card-hover-shadow);
+  transform: translateY(-1px);
 }
 
 .fm-ct-row {
   display: grid;
-  grid-template-columns: 160px minmax(220px, 1fr) 160px 90px 54px 76px 28px;
-  gap: 8px;
+  grid-template-columns: repeat(6, minmax(160px, 1fr)) 40px;
+  gap: 10px;
+  align-items: end;
+  grid-auto-flow: row dense;
+}
+
+.fm-ct-row-actions {
+  display: flex;
   align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  grid-column: -1;
+  grid-row: 1 / -1;
 }
 
 .fm-ct-color {
   width: 44px;
   height: 28px;
   padding: 0;
-  border: 1px solid rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--fm-editor-input-border);
+  border-radius: 10px;
   background: transparent;
 }
 
@@ -401,41 +851,187 @@
 
 .fm-ct-child {
   display: grid;
-  gap: 8px;
-  padding: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.02);
+  gap: 10px;
   box-sizing: border-box;
 }
 
 .fm-ct-child-top {
   display: grid;
-  grid-template-columns: 220px minmax(220px, 1fr) 160px 90px 54px 76px 28px;
-  gap: 8px;
-  align-items: center;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) 40px;
+  gap: 10px;
+  align-items: end;
+  grid-auto-flow: row dense;
 }
 
 .fm-ct-mappings {
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 .fm-ct-map {
   display: grid;
   grid-template-columns: 1fr 180px 28px 28px;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+}
+
+/* Keep custom dropdown control height consistent with inputs */
+.fm-dd.fm-cf-select .fm-dd-btn {
+  height: 28px;
+}
+
+select.fm-cf-select {
+  height: 28px;
+}
+
+/* In-visual onboarding / empty-state */
+.fm-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.fm-empty-card {
+  width: min(860px, 100%);
+  border: 1px solid var(--fm-editor-divider);
+  background: var(--fm-editor-card-bg);
+  border-radius: 16px;
+  padding: 16px;
+  box-sizing: border-box;
+  max-height: calc(100% - 32px);
+  overflow: auto;
+}
+
+.fm-empty-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--fm-editor-text-primary);
+  margin-bottom: 4px;
+}
+
+.fm-empty-sub {
+  color: var(--fm-editor-text-secondary);
+  margin-bottom: 12px;
+}
+
+.fm-empty-accent {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--fm-editor-accent);
+  margin: 10px 0 12px;
+}
+
+.fm-empty-scroll {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.fm-empty-section {
+  border: 1px solid var(--fm-editor-divider);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--fm-editor-input-bg);
+}
+
+.fm-empty-section-title {
+  font-weight: 800;
+  color: var(--fm-editor-text-primary);
+  margin-bottom: 8px;
+}
+
+
+/* Backward compatibility (older markup) */
+.fm-empty-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.fm-empty-box {
+  border: 1px solid var(--fm-editor-divider);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--fm-editor-input-bg);
+}
+.fm-empty-box-title {
+  font-weight: 700;
+  color: var(--fm-editor-text-primary);
+  margin-bottom: 8px;
+}
+
+.fm-empty-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fm-editor-text-secondary);
+}
+
+.fm-empty-tip {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--fm-editor-header-bg);
+  color: var(--fm-editor-header-text);
+  border-left: 3px solid var(--fm-editor-accent);
+}
+
+@media (max-width: 820px) {
+  .fm-empty-grid,
+  .fm-empty-scroll {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 820px) {
+  .fm-ct-row {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+  .fm-ct-child-top {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+  .fm-ct-row-actions {
+    justify-content: flex-start;
+  }
 }
 
 .fm-cf-remove {
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: 6px;
+  border: 1px solid var(--fm-editor-btn-primary);
+  background: var(--fm-editor-btn-primary);
+  border-radius: 10px;
   cursor: pointer;
+  color: #FFFFFF;
+}
+
+.fm-cf-remove:hover {
+  border-color: var(--fm-editor-btn-primary-hover);
+  background: var(--fm-editor-btn-primary-hover);
+}
+
+/* Report-ready preset: Modern Finance (Light) */
+.fm-preset-finance,
+.fm-preset-financezebra {
+  --fm-grid-color: var(--fm-border);
+  --fm-header-bg: var(--fm-header-surface);
+  --fm-zebra-bg: var(--fm-surface-alt);
+  --fm-toggle-border: var(--fm-border);
+  --fm-toggle-radius: 6px;
+  --fm-header-weight: 600;
+  --fm-cell-py: 6px;
+  --fm-cell-px: 12px;
+}
+
+.fm-table.fm-preset-finance .fm-header .fm-th,
+.fm-table.fm-preset-financezebra .fm-header .fm-th {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fm-text-muted);
 }
 
 .fm-zebra {

@@ -1,23 +1,25 @@
 {
+  "supportsLandingPage": true,
+  "supportsEmptyDataView": true,
   "supportsKeyboardFocus": true,
-  "supportsMultiVisualSelection": false,
+  "supportsMultiVisualSelection": true,
   "dataRoles": [
     { "displayName": "Column", "name": "column", "kind": "Grouping" },
     { "displayName": "Row", "name": "category", "kind": "Grouping" },
-    { "displayName": "Group", "name": "group", "kind": "Grouping" },
+    { "displayName": "Values", "name": "values", "kind": "Measure" },
+    { "displayName": "Format by (CF)", "name": "formatBy", "kind": "Measure" },
     { "displayName": "Format by fields (CF)", "name": "formatByField", "kind": "Grouping" },
     { "displayName": "Custom table value fields", "name": "customTableValueField", "kind": "Grouping" },
-    { "displayName": "Values", "name": "values", "kind": "Measure" },
-    { "displayName": "Plan", "name": "plan", "kind": "Measure" },
-    { "displayName": "Forecast", "name": "forecast", "kind": "Measure" },
-    { "displayName": "Format by (CF)", "name": "formatBy", "kind": "Measure" },
     { "displayName": "Custom table values", "name": "customTableValue", "kind": "Measure" },
-    { "displayName": "Tooltips", "name": "tooltips", "kind": "Measure" },
-    { "displayName": "Comments", "name": "comments", "kind": "Grouping" },
-    { "displayName": "Filters", "name": "filters", "kind": "Grouping" },
-    { "displayName": "Category class", "name": "categoryClass", "kind": "Grouping" }
+    { "displayName": "Tooltips", "name": "tooltips", "kind": "Measure" }
   ],
   "objects": {
+    "onboarding": {
+      "displayName": "Onboarding (internal)",
+      "properties": {
+        "hasEverBound": { "displayName": "Has ever bound fields", "type": { "bool": true } }
+      }
+    },
     "conditionalFormatting": {
       "displayName": "Conditional Formatting",
       "properties": {
@@ -41,49 +43,26 @@
           "displayName": "Preset",
           "type": {
             "enumeration": [
+              { "value": "financeBlueZebra", "displayName": "Finance blue (tinted rows)" },
+              { "value": "financePurpleZebra", "displayName": "Finance purple (tinted rows)" },
+              { "value": "financeEmeraldZebra", "displayName": "Finance emerald (tinted rows)" },
+
               { "value": "custom", "displayName": "Custom" },
               { "value": "clean", "displayName": "Clean" },
               { "value": "compact", "displayName": "Compact" },
-              { "value": "softZebra", "displayName": "Soft zebra" },
 
               { "value": "minimal", "displayName": "Minimal" },
-              { "value": "minimalZebra", "displayName": "Minimal zebra" },
               { "value": "ledger", "displayName": "Ledger" },
-              { "value": "ledgerZebra", "displayName": "Ledger zebra" },
               { "value": "statement", "displayName": "Statement" },
-              { "value": "statementZebra", "displayName": "Statement zebra" },
               { "value": "spreadsheet", "displayName": "Spreadsheet" },
-              { "value": "spreadsheetZebra", "displayName": "Spreadsheet zebra" },
               { "value": "boxed", "displayName": "Boxed" },
-              { "value": "boxedZebra", "displayName": "Boxed zebra" },
-              { "value": "airy", "displayName": "Airy" },
-              { "value": "airyZebra", "displayName": "Airy zebra" },
-              { "value": "boldGrid", "displayName": "Bold grid" },
-              { "value": "boldGridZebra", "displayName": "Bold grid zebra" },
-              { "value": "dottedGrid", "displayName": "Dotted grid" },
-              { "value": "dashedGrid", "displayName": "Dashed grid" },
-              { "value": "blueprint", "displayName": "Blueprint" },
-              { "value": "blueprintZebra", "displayName": "Blueprint zebra" },
-              { "value": "mono", "displayName": "Mono" },
-              { "value": "monoZebra", "displayName": "Mono zebra" },
 
               { "value": "card", "displayName": "Card" },
-              { "value": "cardZebra", "displayName": "Card zebra" },
               { "value": "underlineHeader", "displayName": "Underline header" },
-              { "value": "underlineHeaderZebra", "displayName": "Underline header zebra" },
-              { "value": "borderlessDividers", "displayName": "Borderless dividers" },
-              { "value": "borderlessDividersZebra", "displayName": "Borderless dividers zebra" },
-              { "value": "columnDividers", "displayName": "Column dividers" },
-              { "value": "columnDividersZebra", "displayName": "Column dividers zebra" },
-              { "value": "groupDivider", "displayName": "Group divider" },
-              { "value": "groupDividerZebra", "displayName": "Group divider zebra" },
 
               { "value": "premiumSoft", "displayName": "Premium soft cards" },
-              { "value": "premiumSoftZebra", "displayName": "Premium soft cards zebra" },
               { "value": "premiumAccent", "displayName": "Premium accent stripe" },
-              { "value": "premiumAccentZebra", "displayName": "Premium accent stripe zebra" },
-              { "value": "premiumCompact", "displayName": "Premium compact" },
-              { "value": "premiumCompactZebra", "displayName": "Premium compact zebra" }
+              { "value": "premiumCompact", "displayName": "Premium compact" }
             ]
           }
         },
@@ -563,19 +542,13 @@
           "select": [
             { "for": { "in": "column" }, "dataReductionAlgorithm": { "top": {} } },
             { "for": { "in": "category" }, "dataReductionAlgorithm": { "top": {} } },
-            { "for": { "in": "group" } },
             { "for": { "in": "formatByField" }, "dataReductionAlgorithm": { "top": {} } },
-            { "for": { "in": "customTableValueField" }, "dataReductionAlgorithm": { "top": {} } },
-            { "for": { "in": "categoryClass" } },
-            { "for": { "in": "comments" } },
-            { "for": { "in": "filters" } }
+            { "for": { "in": "customTableValueField" }, "dataReductionAlgorithm": { "top": {} } }
           ]
         },
         "values": {
           "select": [
             { "bind": { "to": "values" } },
-            { "bind": { "to": "plan" } },
-            { "bind": { "to": "forecast" } },
             { "bind": { "to": "formatBy" } },
             { "bind": { "to": "customTableValue" } },
             { "bind": { "to": "tooltips" } }
@@ -584,5 +557,10 @@
       }
     }
   ],
+  "tooltips": {
+    "supportedTypes": {
+      "default": true
+    }
+  },
   "privileges": []
 }

@@ -16,52 +16,27 @@ const displayUnitOptions: powerbi.IEnumMember[] = [
 ];
 
 const tablePresetOptions: powerbi.IEnumMember[] = [
+    // Modern attractive finance (gradient header + tinted rows)
+    { value: "financeBlueZebra", displayName: "Finance blue (tinted rows)" },
+    { value: "financePurpleZebra", displayName: "Finance purple (tinted rows)" },
+    { value: "financeEmeraldZebra", displayName: "Finance emerald (tinted rows)" },
+
     { value: "custom", displayName: "Custom" },
     { value: "clean", displayName: "Clean" },
     { value: "compact", displayName: "Compact" },
-    { value: "softZebra", displayName: "Soft zebra" },
-
-    // Modern preset pack (20+)
+    // Curated distinct presets (use the separate 'Zebra rows' toggle when you want alternating rows)
     { value: "minimal", displayName: "Minimal" },
-    { value: "minimalZebra", displayName: "Minimal zebra" },
     { value: "ledger", displayName: "Ledger" },
-    { value: "ledgerZebra", displayName: "Ledger zebra" },
     { value: "statement", displayName: "Statement" },
-    { value: "statementZebra", displayName: "Statement zebra" },
     { value: "spreadsheet", displayName: "Spreadsheet" },
-    { value: "spreadsheetZebra", displayName: "Spreadsheet zebra" },
     { value: "boxed", displayName: "Boxed" },
-    { value: "boxedZebra", displayName: "Boxed zebra" },
-    { value: "airy", displayName: "Airy" },
-    { value: "airyZebra", displayName: "Airy zebra" },
-    { value: "boldGrid", displayName: "Bold grid" },
-    { value: "boldGridZebra", displayName: "Bold grid zebra" },
-    { value: "dottedGrid", displayName: "Dotted grid" },
-    { value: "dashedGrid", displayName: "Dashed grid" },
-    { value: "blueprint", displayName: "Blueprint" },
-    { value: "blueprintZebra", displayName: "Blueprint zebra" },
-    { value: "mono", displayName: "Mono" },
-    { value: "monoZebra", displayName: "Mono zebra" },
 
-    // More distinct patterns (internet-inspired)
     { value: "card", displayName: "Card" },
-    { value: "cardZebra", displayName: "Card zebra" },
     { value: "underlineHeader", displayName: "Underline header" },
-    { value: "underlineHeaderZebra", displayName: "Underline header zebra" },
-    { value: "borderlessDividers", displayName: "Borderless dividers" },
-    { value: "borderlessDividersZebra", displayName: "Borderless dividers zebra" },
-    { value: "columnDividers", displayName: "Column dividers" },
-    { value: "columnDividersZebra", displayName: "Column dividers zebra" },
-    { value: "groupDivider", displayName: "Group divider" },
-    { value: "groupDividerZebra", displayName: "Group divider zebra" },
 
-    // Premium SaaS-style (card rows, calm neutral palette)
     { value: "premiumSoft", displayName: "Premium soft cards" },
-    { value: "premiumSoftZebra", displayName: "Premium soft cards zebra" },
     { value: "premiumAccent", displayName: "Premium accent stripe" },
-    { value: "premiumAccentZebra", displayName: "Premium accent stripe zebra" },
-    { value: "premiumCompact", displayName: "Premium compact" },
-    { value: "premiumCompactZebra", displayName: "Premium compact zebra" }
+    { value: "premiumCompact", displayName: "Premium compact" }
 ];
 
 const columnWidthModeOptions: powerbi.IEnumMember[] = [
@@ -91,7 +66,7 @@ class TableCardSettings extends FormattingSettingsCard {
     preset = new formattingSettings.ItemDropdown({
         name: "preset",
         displayName: "Preset",
-        value: tablePresetOptions[0],
+        value: tablePresetOptions.find(x => x.value === "financeBlueZebra") || tablePresetOptions[0],
         items: tablePresetOptions
     });
 
