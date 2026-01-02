@@ -217,6 +217,10 @@ interface CFConfig {
 
 type CTAggregation = "none" | "sum" | "avg" | "min" | "max" | "count";
 
+type CTTextOperator = "contains" | "equals" | "notEquals";
+
+type CTParentFilterMode = "include" | "exclude";
+
 interface CTValueMapping {
     field: string; // display label from bound fields (e.g. "Sales" or a category name)
     aggregation: CTAggregation;
@@ -249,6 +253,20 @@ interface CTChildRow {
     childNameFromField?: string;
     // Optional: if set, only include values where this field equals setParentNo (e.g., Country == parentNo).
     parentMatchField?: string;
+
+    // Optional: for nested auto children (sub-children under an auto parent), controls whether the
+    // parent's value filter is applied to this row.
+    // Default behavior: apply=true + mode="include".
+    parentFilterApply?: boolean;
+    parentFilterMode?: CTParentFilterMode;
+
+    // Backward-compat (old name). Parsed into parentFilterApply.
+    inheritParentFilter?: boolean;
+    // Optional: further filter auto-generated child values based on a condition.
+    // Applies to the value of childNameFromField.
+    conditionalMappingEnabled?: boolean;
+    conditionalMappingOperator?: CTTextOperator;
+    conditionalMappingValue?: string;
     values: CTValueMapping[];
     format?: {
         fontFamily?: string;
@@ -718,8 +736,37 @@ function toNumber(v: any): number {
     if (typeof v === "number") return v;
     if (typeof v === "boolean") return v ? 1 : 0;
     if (v == null) return NaN;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : NaN;
+
+    // Power BI typically provides numeric columns as numbers, but some models/fields can
+    // arrive as formatted strings (e.g. "1,234", "(2,000)", "$3,000").
+    const direct = Number(v);
+    if (Number.isFinite(direct)) return direct;
+
+    if (typeof v === "string") {
+        let s = v.trim();
+        if (!s) return NaN;
+
+        // Handle parentheses negative: (123) => -123
+        let negative = false;
+        if (s.startsWith("(") && s.endsWith(")")) {
+            negative = true;
+            s = s.slice(1, -1).trim();
+        }
+
+        // Strip common currency/percent symbols and spaces.
+        s = s.replace(/[$€£¥%\s]/g, "");
+
+        // If it looks like a thousands-separated integer (1,234 or 12,345,678), remove commas.
+        // We intentionally do NOT treat a single comma as decimal separator to avoid locale ambiguity.
+        if (/^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
+            s = s.replace(/,/g, "");
+        }
+
+        const parsed = Number(s);
+        if (Number.isFinite(parsed)) return negative ? -parsed : parsed;
+    }
+
+    return NaN;
 }
 
 function toBool(v: any): boolean {
@@ -941,7 +988,12 @@ export class Visual implements IVisual {
             // UX rule: once the user starts binding anything, hide the onboarding (even if not fully ready).
             const hasAnyValue = valsNow.some(v => {
                 const roles: any = v?.source?.roles || {};
-                return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+                const src: any = v?.source;
+                if (roles.values) return true;
+                if (roles.formatBy) return true;
+                // Custom table values must be actual measures (avoid implicit aggregations like "First" on text columns).
+                if (roles.customTableValue) return src?.isMeasure === true;
+                return false;
             });
             if (!hasAnyValue) {
                 this.hideLanding();
@@ -957,7 +1009,9 @@ export class Visual implements IVisual {
             const hasRow = catsNow.some(c => !!c?.source?.roles?.category);
             const hasAnyValue = valsNow.some(v => {
                 const roles: any = v?.source?.roles || {};
-                return !!roles.values || !!roles.customTableValue || !!roles.formatBy;
+                // In normal (non-Custom Table) mode, only the standard Values role should drive rendering.
+                // Custom Table values are isolated to the Custom Table editor/mode.
+                return !!roles.values;
             });
 
             // UX rule: as soon as *any* field is added (any role), hide the onboarding.
@@ -1007,9 +1061,12 @@ export class Visual implements IVisual {
 
             // Dedicated Custom Table values role
             if (roles.customTableValue) {
-                const ctLabel = name;
-                ctRoleOut.add(ctLabel);
-                ctRoleIsMeasure.set(ctLabel, true);
+                // Only allow true measures in the Custom table values role.
+                if (isMeasure) {
+                    const ctLabel = name;
+                    ctRoleOut.add(ctLabel);
+                    ctRoleIsMeasure.set(ctLabel, true);
+                }
             }
         }
 
@@ -1028,9 +1085,12 @@ export class Visual implements IVisual {
             ctFallbackIsMeasure.set(fallbackLabel, true);
 
             if (roles.customTableValue) {
-                const ctLabel = name;
-                ctRoleOut.add(ctLabel);
-                ctRoleIsMeasure.set(ctLabel, true);
+                // Only allow true measures in the Custom table values role.
+                if (src?.isMeasure === true) {
+                    const ctLabel = name;
+                    ctRoleOut.add(ctLabel);
+                    ctRoleIsMeasure.set(ctLabel, true);
+                }
             }
         }
 
@@ -1683,6 +1743,17 @@ export class Visual implements IVisual {
                     const childName = String(c?.childName ?? "").trim();
                     const childNameFromField = String((c as any)?.childNameFromField ?? "").trim();
                     const parentMatchField = String((c as any)?.parentMatchField ?? "").trim();
+                    const parentFilterApplyRaw = (c as any)?.parentFilterApply;
+                    const legacyInheritOff = (c as any)?.inheritParentFilter === false;
+                    const parentFilterApply = (parentFilterApplyRaw === false || legacyInheritOff) ? false : undefined;
+                    const parentFilterModeRaw = String((c as any)?.parentFilterMode ?? "").trim();
+                    const parentFilterMode: CTParentFilterMode | undefined = (parentFilterModeRaw === "exclude") ? "exclude" : undefined;
+                    const conditionalMappingEnabled = (c as any)?.conditionalMappingEnabled === true;
+                    const conditionalMappingOperatorRaw = String((c as any)?.conditionalMappingOperator ?? "").trim();
+                    const conditionalMappingOperator: CTTextOperator = (conditionalMappingOperatorRaw === "equals" || conditionalMappingOperatorRaw === "notEquals" || conditionalMappingOperatorRaw === "contains")
+                        ? (conditionalMappingOperatorRaw as CTTextOperator)
+                        : "contains";
+                    const conditionalMappingValue = String((c as any)?.conditionalMappingValue ?? "").trim();
                     const valuesRaw: any[] = Array.isArray(c?.values) ? (c.values as any[]) : [];
                     const values: CTValueMapping[] = valuesRaw
                         .map(v => ({
@@ -1698,11 +1769,74 @@ export class Visual implements IVisual {
                         childName,
                         childNameFromField: childNameFromField || undefined,
                         parentMatchField: parentMatchField || undefined,
+                        parentFilterApply,
+                        parentFilterMode,
+                        conditionalMappingEnabled: conditionalMappingEnabled ? true : undefined,
+                        conditionalMappingOperator: conditionalMappingEnabled ? conditionalMappingOperator : undefined,
+                        conditionalMappingValue: conditionalMappingEnabled ? (conditionalMappingValue || undefined) : undefined,
                         values,
                         format: normFormat(c?.format)
                     };
                 })
                 .filter(c => !!c.childName || !!c.childNameFromField);
+
+            // Validate nesting links (parentChildId):
+            // - must reference an existing child id (manual OR auto-template)
+            // - no self-reference
+            // - no cycles
+            // - if nested, clear setParentNo for placement
+            // Note: manual children nested under an auto-template parent are ambiguous (would require replication),
+            // so we clear that link.
+            const childById = new Map<string, any>();
+            const childIsAuto = new Map<string, boolean>();
+            for (const c of children as any[]) {
+                const id = String((c as any)?.id || "").trim();
+                if (!id) continue;
+                childById.set(id, c);
+                childIsAuto.set(id, !!String((c as any)?.childNameFromField || "").trim());
+            }
+            for (const c of children as any[]) {
+                const id = String((c as any)?.id || "").trim();
+                const pid = String((c as any)?.parentChildId || "").trim();
+                if (!pid) continue;
+                if (!id || pid === id) {
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                if (!childById.has(pid)) {
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                const parentIsAuto = childIsAuto.get(pid) === true;
+                const thisIsAuto = childIsAuto.get(id) === true;
+                if (parentIsAuto && !thisIsAuto) {
+                    // Manual child under auto-template parent is not supported (ambiguous replication).
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                (c as any).setParentNo = "";
+            }
+            // Break cycles (single-parent graph): if walking parentChildId chain loops, clear the starting link.
+            for (const c of children as any[]) {
+                const startId = String((c as any)?.id || "").trim();
+                if (!startId) continue;
+                const startPid = String((c as any)?.parentChildId || "").trim();
+                if (!startPid) continue;
+                const seen = new Set<string>();
+                seen.add(startId);
+                let curId = startPid;
+                let safety = 0;
+                while (curId && safety++ < 200) {
+                    if (seen.has(curId)) {
+                        (c as any).parentChildId = undefined;
+                        break;
+                    }
+                    seen.add(curId);
+                    const parent = childById.get(curId);
+                    if (!parent) break;
+                    curId = String((parent as any)?.parentChildId || "").trim();
+                }
+            }
 
             const showValueNamesInColumns = (parsed as any)?.showValueNamesInColumns === true;
             const hiddenColumnFieldKeys = Array.isArray((parsed as any)?.hiddenColumnFieldKeys)
@@ -2267,19 +2401,73 @@ export class Visual implements IVisual {
                 const childFieldSel = makeCategoryFieldSelect(String((c as any).childNameFromField || "").trim(), "Child name field");
                 const parentMatchSel = makeCategoryFieldSelect(String((c as any).parentMatchField || "").trim(), "(Optional) Parent match field");
 
+                const parentFilterWrap = document.createElement("label");
+                parentFilterWrap.className = "fm-ct-bold";
+                const parentFilterChk = document.createElement("input");
+                parentFilterChk.type = "checkbox";
+                parentFilterChk.checked = (c as any).parentFilterApply !== false && (c as any).inheritParentFilter !== false;
+                parentFilterWrap.appendChild(parentFilterChk);
+                const parentFilterTxt = document.createElement("span");
+                parentFilterTxt.textContent = "Parent filter apply";
+                parentFilterWrap.appendChild(parentFilterTxt);
+
+                const parentFilterModeSel = makeSelect();
+                addOption(parentFilterModeSel.select, "include", "Include parent value");
+                addOption(parentFilterModeSel.select, "exclude", "Exclude parent value");
+                const pfModeRaw = String((c as any).parentFilterMode || "").trim();
+                const pfMode = (pfModeRaw === "exclude") ? "exclude" : "include";
+                parentFilterModeSel.setValue(pfMode);
+                parentFilterModeSel.syncFromSelect();
+
                 const childFieldWrap = wrapField("Child name field", childFieldSel.host);
                 const parentMatchWrap = wrapField("Parent match field", parentMatchSel.host);
+                const parentFilterWrapField = wrapField("", parentFilterWrap);
+                const parentFilterModeWrap = wrapField("", parentFilterModeSel.host);
+
+                const condWrap = document.createElement("label");
+                condWrap.className = "fm-ct-bold";
+                const condChk = document.createElement("input");
+                condChk.type = "checkbox";
+                condChk.checked = !!(c as any).conditionalMappingEnabled;
+                condWrap.appendChild(condChk);
+                const condTxt = document.createElement("span");
+                condTxt.textContent = "Conditional mapping";
+                condWrap.appendChild(condTxt);
+
+                const condOpSel = makeSelect();
+                addOption(condOpSel.select, "contains", "Contains");
+                addOption(condOpSel.select, "equals", "Equals");
+                addOption(condOpSel.select, "notEquals", "Not equal");
+                const condOpRaw = String((c as any).conditionalMappingOperator || "").trim();
+                const condOp = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals") ? condOpRaw : "contains";
+                condOpSel.setValue(condOp);
+                condOpSel.syncFromSelect();
+
+                const condValInp = makeTextInput(String((c as any).conditionalMappingValue || "").trim(), "");
+
+                const condOpWrap = wrapField("Operator", condOpSel.host);
+                const condValWrap = wrapField("", condValInp);
 
                 const syncAutoUi = () => {
                     const enabled = autoChk.checked;
                     childFieldWrap.style.display = enabled ? "" : "none";
-                    parentMatchWrap.style.display = enabled ? "" : "none";
+                    // Parent match field is intentionally hidden (too confusing for users right now).
+                    parentMatchWrap.style.display = "none";
+                    parentFilterWrapField.style.display = (enabled && isNested) ? "" : "none";
+                    parentFilterModeWrap.style.display = (enabled && isNested && parentFilterChk.checked) ? "" : "none";
+                    const condEnabled = enabled;
+                    condOpWrap.style.display = (condEnabled && condChk.checked) ? "" : "none";
+                    condValWrap.style.display = (condEnabled && condChk.checked) ? "" : "none";
+                    condWrap.style.display = condEnabled ? "" : "none";
                     childName.disabled = enabled;
                     if (enabled) {
                         c.childName = "";
                     } else {
                         (c as any).childNameFromField = undefined;
                         (c as any).parentMatchField = undefined;
+                        (c as any).parentFilterApply = undefined;
+                        (c as any).parentFilterMode = undefined;
+                        (c as any).inheritParentFilter = undefined;
                     }
                 };
 
@@ -2338,8 +2526,23 @@ export class Visual implements IVisual {
                     } else {
                         (c as any).childNameFromField = undefined;
                         (c as any).parentMatchField = undefined;
+                        (c as any).parentFilterApply = undefined;
+                        (c as any).parentFilterMode = undefined;
+                        (c as any).inheritParentFilter = undefined;
                     }
                     syncAutoUi();
+                };
+
+                parentFilterChk.onchange = () => {
+                    (c as any).parentFilterApply = parentFilterChk.checked ? undefined : false;
+                    // keep legacy field cleared once user edits
+                    (c as any).inheritParentFilter = undefined;
+                    syncAutoUi();
+                };
+                parentFilterModeSel.select.onchange = () => {
+                    const v = String(parentFilterModeSel.getValue() || "").trim();
+                    (c as any).parentFilterMode = (v === "exclude") ? "exclude" : undefined;
+                    (c as any).inheritParentFilter = undefined;
                 };
 
                 childFieldSel.select.onchange = () => {
@@ -2347,6 +2550,19 @@ export class Visual implements IVisual {
                 };
                 parentMatchSel.select.onchange = () => {
                     (c as any).parentMatchField = String(parentMatchSel.getValue() || "").trim() || undefined;
+                };
+
+                condChk.onchange = () => {
+                    (c as any).conditionalMappingEnabled = condChk.checked ? true : undefined;
+                    syncAutoUi();
+                };
+                condOpSel.select.onchange = () => {
+                    const v = String(condOpSel.getValue() || "").trim();
+                    (c as any).conditionalMappingOperator = (v === "contains" || v === "equals" || v === "notEquals") ? (v as any) : "contains";
+                };
+                condValInp.oninput = () => {
+                    const v = String(condValInp.value || "");
+                    (c as any).conditionalMappingValue = v.trim() || undefined;
                 };
 
                 const del = document.createElement("button");
@@ -2365,6 +2581,11 @@ export class Visual implements IVisual {
                 top.appendChild(wrapField("Auto", autoWrap));
                 top.appendChild(childFieldWrap);
                 top.appendChild(parentMatchWrap);
+                top.appendChild(parentFilterWrapField);
+                top.appendChild(parentFilterModeWrap);
+                top.appendChild(wrapField("Conditional", condWrap));
+                top.appendChild(condOpWrap);
+                top.appendChild(condValWrap);
                 top.appendChild(wrapField("Font", font.host));
                 top.appendChild(wrapField("Size", size));
                 top.appendChild(wrapField("Color", color));
@@ -2468,13 +2689,13 @@ export class Visual implements IVisual {
 
                 const kids = childrenByParentId.get(cId) || [];
                 const subWrap = document.createElement("div");
-                subWrap.className = "fm-ct-mappings";
+                subWrap.className = "fm-ct-mappings fm-ct-sub";
 
                 const subHeader = document.createElement("div");
-                subHeader.className = "fm-ct-map";
+                subHeader.className = "fm-ct-sub-header";
 
                 const subTitle = document.createElement("div");
-                subTitle.className = "fm-cf-label";
+                subTitle.className = "fm-cf-label fm-ct-sub-title";
                 subTitle.textContent = "Sub-children";
 
                 const addSubBtn = document.createElement("button");
@@ -2495,9 +2716,7 @@ export class Visual implements IVisual {
                     renderChildren();
                 };
 
-                // If this row is auto-generated template, nesting is ambiguous; hide CTA to avoid confusion.
-                const isAutoRow = !!String((c as any)?.childNameFromField || "").trim();
-                if (isAutoRow) addSubBtn.style.display = "none";
+                // Auto-template children now support sub-children (nested under each generated value).
 
                 subHeader.appendChild(subTitle);
                 subHeader.appendChild(addSubBtn);
@@ -2594,6 +2813,17 @@ export class Visual implements IVisual {
                     childName: String(c.childName || "").trim(),
                     childNameFromField: String((c as any).childNameFromField || "").trim() || undefined,
                     parentMatchField: String((c as any).parentMatchField || "").trim() || undefined,
+                    parentFilterApply: (((c as any).parentFilterApply === false) || ((c as any).inheritParentFilter === false)) ? false : undefined,
+                    parentFilterMode: (String((c as any).parentFilterMode || "").trim() === "exclude") ? ("exclude" as CTParentFilterMode) : undefined,
+                    conditionalMappingEnabled: ((c as any).conditionalMappingEnabled === true) ? true : undefined,
+                    conditionalMappingOperator: (() => {
+                        if ((c as any).conditionalMappingEnabled !== true) return undefined;
+                        const raw = String((c as any).conditionalMappingOperator || "contains").trim();
+                        return (raw === "contains" || raw === "equals" || raw === "notEquals") ? (raw as any) : "contains";
+                    })(),
+                    conditionalMappingValue: ((c as any).conditionalMappingEnabled === true)
+                        ? (String((c as any).conditionalMappingValue || "").trim() || undefined)
+                        : undefined,
                     values: (() => {
                         const cleaned = (Array.isArray(c.values) ? c.values : [])
                             .map(v => ({ field: String(v.field || "").trim(), aggregation: (String((v as any).aggregation || "none").trim().toLowerCase() as CTAggregation) || "none" }))
@@ -2603,6 +2833,60 @@ export class Visual implements IVisual {
                     format: cleanFormat((c as any).format)
                 }))
                 .filter(c => !!c.childName || !!(c as any).childNameFromField);
+
+            // Validate nesting links (parentChildId) before persisting.
+            // - must reference an existing child id (manual OR auto-template)
+            // - no self-reference, no cycles
+            // - if nested, clear setParentNo
+            // Manual child under auto-template parent is not supported (ambiguous replication), so clear.
+            const childById = new Map<string, any>();
+            const childIsAuto = new Map<string, boolean>();
+            for (const c of (draft.children as any[])) {
+                const id = String((c as any)?.id || "").trim();
+                if (!id) continue;
+                childById.set(id, c);
+                childIsAuto.set(id, !!String((c as any)?.childNameFromField || "").trim());
+            }
+            for (const c of (draft.children as any[])) {
+                const id = String((c as any)?.id || "").trim();
+                const pid = String((c as any)?.parentChildId || "").trim();
+                if (!pid) continue;
+                if (!id || pid === id) {
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                if (!childById.has(pid)) {
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                const parentIsAuto = childIsAuto.get(pid) === true;
+                const thisIsAuto = childIsAuto.get(id) === true;
+                if (parentIsAuto && !thisIsAuto) {
+                    (c as any).parentChildId = undefined;
+                    continue;
+                }
+                (c as any).setParentNo = "";
+            }
+            for (const c of (draft.children as any[])) {
+                const startId = String((c as any)?.id || "").trim();
+                if (!startId) continue;
+                const startPid = String((c as any)?.parentChildId || "").trim();
+                if (!startPid) continue;
+                const seen = new Set<string>();
+                seen.add(startId);
+                let curId = startPid;
+                let safety = 0;
+                while (curId && safety++ < 200) {
+                    if (seen.has(curId)) {
+                        (c as any).parentChildId = undefined;
+                        break;
+                    }
+                    seen.add(curId);
+                    const parent = childById.get(curId);
+                    if (!parent) break;
+                    curId = String((parent as any)?.parentChildId || "").trim();
+                }
+            }
 
             draft.showValueNamesInColumns = draft.showValueNamesInColumns === true;
             draft.hiddenColumnFieldKeys = Array.isArray(draft.hiddenColumnFieldKeys)
@@ -3530,7 +3814,7 @@ export class Visual implements IVisual {
         const sub = document.createElement("div");
         sub.className = "fm-empty-sub";
         if (ctx.reason === "noDataView" || (ctx.missingRow && ctx.missingValues)) {
-            sub.textContent = "Premium guide: follow the steps below.";
+            sub.textContent = "Setup guide: follow the steps below.";
         } else if (ctx.missingRow) {
             sub.textContent = "Row is missing. Add at least one field to Row to start. This screen auto-hides when the visual is ready.";
         } else if (ctx.missingValues) {
@@ -3575,7 +3859,7 @@ export class Visual implements IVisual {
                 "Column (optional): add one or more fields for multi-level column headers (Year > Month > …).",
                 "Presets: choose a preset for instant styling; then fine-tune Header / Rows / Totals.",
                 "Conditional Formatting: open editor to add Rules, Gradients, Field-value formatting, and Icons.",
-                "Custom Table (optional): enable it to define Parent/Child layout and control which values appear in each row."
+                "Custom Table (optional): enable it to build a statement layout (Parent/Child/Sub-child) and control which values appear in each row."
             ],
             true
         );
@@ -3588,7 +3872,7 @@ export class Visual implements IVisual {
                 "Column (optional): builds column grouping / hierarchy in the header.",
                 "Group (optional): lets you group rows for layout/format scenarios.",
                 "Format by fields (CF): bind fields you want to use in Conditional Formatting 'Based on field'.",
-                "Custom table value fields / values: dedicated bindings for Custom Table mapping (optional)."
+                "Custom table value fields / values: dedicated bindings for Custom Table mapping (optional; isolated from normal mode)."
             ]
         );
 
@@ -3643,10 +3927,11 @@ export class Visual implements IVisual {
         addSection(
             "Custom Table (advanced layout)",
             [
-                "Turn on Custom Table to design a statement layout (P&L / Balance Sheet) with custom Parent/Child rows.",
-                "Map each row to a bound field/measure (Values) and choose aggregation behavior.",
-                "Optionally hide selected column groups to keep the layout clean.",
-                "Use 'Show value names in columns' when you want value labels visible in headers."
+                "Turn on Custom Table to design a statement layout (P&L / Balance Sheet) using Parent/Child/Sub-child rows.",
+                "Auto rows: generate children from a field (From field) and optionally use Conditional mapping (contains/equals/not equals).",
+                "Nested auto sub-children support Parent filter apply with Include/Exclude parent value.",
+                "Map each row to a bound field/measure and choose aggregation (sum/avg/min/max/count/none). Measures always use 'none'.",
+                "Custom Table is isolated: when OFF, your normal matrix behavior stays unchanged."
             ]
         );
 
@@ -5480,15 +5765,40 @@ export class Visual implements IVisual {
         }
 
         const categorical = dataView.categorical;
-        const categories = categorical?.categories ?? [];
+        // Normal mode must be fully isolated from Custom Table buckets.
+        // We intentionally do not filter categories based on Custom Table roles here.
+        // The normal table uses only standard roles (Row/Column/etc.) downstream.
+        const categories = (categorical?.categories ?? []);
         const values = categorical?.values ?? [];
 
-        const rowCats = categories.filter(c => !!c.source.roles?.category);
-        const groupCat = categories.find(c => !!c.source.roles?.group);
-        const categoryClassCat = categories.find(c => !!c.source.roles?.categoryClass);
-        const commentsCat = categories.find(c => !!c.source.roles?.comments);
-        const columnCats = categories.filter(c => !!c.source.roles?.column);
-        const formatByFieldCats = categories.filter(c => !!c.source.roles?.formatByField);
+        // Power BI may include the same underlying field multiple times in categorical.categories/values
+        // when it is bound to multiple roles (e.g., Row + Custom table fields). In normal mode we must
+        // dedupe by field key so Custom Table bindings never duplicate/alter the normal report.
+        const dedupeByKey = <T>(items: T[], keyOf: (item: T) => string): T[] => {
+            const out: T[] = [];
+            const seen = new Set<string>();
+            for (const it of items) {
+                const k = String(keyOf(it) || "").trim();
+                if (!k) {
+                    out.push(it);
+                    continue;
+                }
+                if (seen.has(k)) continue;
+                seen.add(k);
+                out.push(it);
+            }
+            return out;
+        };
+        const catKey = (c: any): string => String(c?.source?.queryName || c?.source?.displayName || "");
+        const valKey = (v: any): string => String(v?.source?.queryName || v?.source?.displayName || "");
+
+        const rowCats = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.category), catKey);
+        const groupCat = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.group), catKey)[0];
+        const categoryClassCat = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.categoryClass), catKey)[0];
+        const commentsCat = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.comments), catKey)[0];
+        const columnCats = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.column), catKey);
+        const formatByFieldCats = dedupeByKey(categories.filter(c => !!(c as any)?.source?.roles?.formatByField), catKey);
+        const valuesDeduped = dedupeByKey(values as any[], valKey) as any as typeof values;
 
         const rowCatValues = rowCats.map(c => (c.values ?? []) as any[]);
         const groupValues = (groupCat?.values ?? []) as any[];
@@ -5537,7 +5847,10 @@ export class Visual implements IVisual {
 
         const pickBucket = (v: powerbi.DataViewValueColumn): ColumnBucket | null => {
             const roles: any = v?.source?.roles || {};
-            if (roles.values || roles.customTableValue || roles.formatBy) return "values";
+            // Normal table should only render measures from the Values role.
+            // Keep other measure roles (e.g., formatBy/customTableValue) available for CF/internal use,
+            // but do not render them as visible columns.
+            if (roles.values) return "values";
             return null;
         };
 
@@ -5588,7 +5901,7 @@ export class Visual implements IVisual {
         const rowSelectionIdByCode = new Map<string, powerbi.extensibility.ISelectionId>();
 
         const tooltipMeasureSet = new Set<string>();
-        for (const v of values) {
+        for (const v of valuesDeduped) {
             const roles: any = v?.source?.roles || {};
             if (roles.tooltips) {
                 tooltipMeasureSet.add(getMeasureDisplayName(v));
@@ -5740,7 +6053,7 @@ export class Visual implements IVisual {
             }
 
             // Store measures into bucketed columns + column hierarchy
-            for (const v of values) {
+                for (const v of valuesDeduped) {
                 const bucket = pickBucket(v);
                 if (!bucket) continue;
                 const m = getMeasureDisplayName(v);
@@ -5758,7 +6071,7 @@ export class Visual implements IVisual {
             }
 
             // Capture raw values for any bound measures (including formatBy) for Field value.
-            for (const v of values) {
+            for (const v of valuesDeduped) {
                 const src: any = v?.source;
                 const name = (src?.displayName || src?.queryName || "").toString().trim();
                 if (!name) continue;
@@ -6249,6 +6562,37 @@ export class Visual implements IVisual {
         const columnCats = visibleColumnPairs.map(p => p.c);
         const columnCatValues = visibleColumnPairs.map(p => p.values);
 
+        const cfgChildrenAll = (Array.isArray(cfg.children) ? cfg.children : []).slice();
+        const cfgChildById = new Map<string, any>();
+        const cfgChildIsAuto = new Map<string, boolean>();
+        for (const c of cfgChildrenAll as any[]) {
+            const id = String((c as any)?.id || "").trim();
+            if (!id) continue;
+            cfgChildById.set(id, c);
+            cfgChildIsAuto.set(id, !!String((c as any)?.childNameFromField || "").trim());
+        }
+        const depthMemo = new Map<string, number>();
+        const depthOf = (id: string, stack?: Set<string>): number => {
+            const key = String(id || "").trim();
+            if (!key) return 0;
+            if (depthMemo.has(key)) return depthMemo.get(key)!;
+            const localStack = stack || new Set<string>();
+            if (localStack.has(key)) return 0;
+            localStack.add(key);
+            const c = cfgChildById.get(key);
+            const pid = String((c as any)?.parentChildId || "").trim();
+            const d = pid ? (1 + depthOf(pid, localStack)) : 0;
+            localStack.delete(key);
+            depthMemo.set(key, d);
+            return d;
+        };
+        const cfgChildren = cfgChildrenAll.slice().sort((a: any, b: any) => {
+            const da = depthOf(String((a as any)?.id || "").trim());
+            const db = depthOf(String((b as any)?.id || "").trim());
+            if (da !== db) return da - db;
+            return String((a as any)?.id || "").localeCompare(String((b as any)?.id || ""));
+        });
+
         const norm = (v: any): string => {
             const s = v == null ? "" : String(v);
             const t = s.trim();
@@ -6585,43 +6929,108 @@ export class Visual implements IVisual {
             if (cn && !childNoById.has(id)) childNoById.set(id, cn);
         }
 
-        for (const c of (cfg.children || [])) {
+        const generatedCodesByTemplateId = new Map<string, string[]>();
+
+        for (const c of cfgChildren as any[]) {
             const autoChildField = String((c as any).childNameFromField || "").trim();
             if (autoChildField) {
                 const parentNo = String(c.setParentNo || "").trim();
                 const parentChildId = String((c as any).parentChildId || "").trim();
-                const parentCode = parentChildId
-                    ? (childCodeById.get(parentChildId) || null)
-                    : (parentNo ? (parentCodeByNo.get(parentNo) || null) : null);
+                const parentFilterApply = (c as any).parentFilterApply !== false && (c as any).inheritParentFilter !== false;
+                const parentFilterMode: CTParentFilterMode = ((c as any).parentFilterMode === "exclude") ? "exclude" : "include";
+                const parentCfg = parentChildId ? (cfgChildById.get(parentChildId) || null) : null;
+
+                const parentTargets: Array<{ code: string | null; matchValue?: string }> = (() => {
+                    if (parentChildId) {
+                        const manualParent = childCodeById.get(parentChildId);
+                        if (manualParent) return [{ code: manualParent }];
+                        const codes = generatedCodesByTemplateId.get(parentChildId);
+                        if (codes && codes.length > 0) {
+                            return codes.map(pc => ({ code: pc, matchValue: String(dataLabelByCode.get(pc) || "").trim() || undefined }));
+                        }
+                        return [{ code: null }];
+                    }
+                    return [{ code: parentNo ? (parentCodeByNo.get(parentNo) || null) : null }];
+                })();
+
                 const childArr = categoryByLabel.get(autoChildField) || null;
-                const parentMatchField = String((c as any).parentMatchField || "").trim();
+                const parentMatchFieldRaw = String((c as any).parentMatchField || "").trim();
+                const inferredParentMatchField = (!parentMatchFieldRaw && parentCfg && cfgChildIsAuto.get(parentChildId) === true)
+                    ? String((parentCfg as any)?.childNameFromField || "").trim()
+                    : "";
+                const parentMatchField = parentMatchFieldRaw || inferredParentMatchField;
                 const parentArr = parentMatchField ? (categoryByLabel.get(parentMatchField) || null) : null;
                 if (!childArr) continue;
 
-                const parentNoNorm = parentNo ? norm(parentNo) : "";
-                const distinct = new Set<string>();
-                for (let i = 0; i < rowCount; i++) {
-                    if (parentArr && parentNoNorm) {
-                        if (norm((parentArr as any[])[i]) !== parentNoNorm) continue;
+                const passesParentFilter = (rowIndex: number, parentMatchValueNorm: string, parentNoNorm: string): boolean => {
+                    if (!parentArr) return true;
+
+                    // Nested under a parent child template/value.
+                    if (parentChildId) {
+                        if (!parentFilterApply) return true;
+                        const target = parentMatchValueNorm || parentNoNorm;
+                        if (!target) return true;
+                        const eq = norm((parentArr as any[])[rowIndex]) === target;
+                        return parentFilterMode === "exclude" ? !eq : eq;
                     }
-                    const cv = norm((childArr as any[])[i]);
-                    if (!cv) continue;
-                    distinct.add(cv);
-                }
-                const childValues = Array.from(distinct.values()).sort((a, b) => a.localeCompare(b));
-                for (const childValue of childValues) {
-                    const code = `CTA:${safeCodePart(c.id)}:${safeCodePart(parentNo)}:${safeCodePart(autoChildField)}:${safeCodePart(childValue)}`;
-                    dataLabelByCode.set(code, childValue);
-                    dataParentByCode.set(code, parentCode);
-                    const parentLvl = parentCode ? (dataRowLevelByCode.get(parentCode) ?? 0) : -1;
-                    dataRowLevelByCode.set(code, parentCode ? (parentLvl + 1) : 0);
-                    dataGroupKeyByCode.set(code, null);
-                    setRowFieldRaw(code, "Set Parent No", parentNo);
-                    const parentChildNo = parentChildId ? (childNoById.get(parentChildId) || "") : "";
-                    if (parentChildId) setRowFieldRaw(code, "Set Child", parentChildNo || parentChildId);
-                    setRowFieldRaw(code, "Child Name", childValue);
-                    setRowFieldRaw(code, "Child Name Field", autoChildField);
-                    if (parentMatchField) setRowFieldRaw(code, "Parent Match Field", parentMatchField);
+
+                    // Top-level (setParentNo) auto row: always filter to its parent.
+                    if (parentMatchValueNorm) {
+                        return norm((parentArr as any[])[rowIndex]) === parentMatchValueNorm;
+                    }
+                    if (parentNoNorm) {
+                        return norm((parentArr as any[])[rowIndex]) === parentNoNorm;
+                    }
+                    return true;
+                };
+
+                const condEnabled = (c as any).conditionalMappingEnabled === true;
+                const condOpRaw = String((c as any).conditionalMappingOperator || "contains").trim();
+                const condOp: CTTextOperator = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals")
+                    ? (condOpRaw as CTTextOperator)
+                    : "contains";
+                const condValue = String((c as any).conditionalMappingValue || "").trim();
+                const condNeedle = condValue.toLocaleLowerCase();
+                const matchesCond = (candidate: string): boolean => {
+                    if (!condEnabled) return true;
+                    if (!condNeedle) return true;
+                    const hay = String(candidate || "").toLocaleLowerCase();
+                    if (condOp === "contains") return hay.indexOf(condNeedle) >= 0;
+                    if (condOp === "equals") return hay === condNeedle;
+                    if (condOp === "notEquals") return hay !== condNeedle;
+                    return true;
+                };
+
+                const parentNoNorm = parentNo ? norm(parentNo) : "";
+                const templateId = String((c as any).id || "").trim();
+                if (templateId && !generatedCodesByTemplateId.has(templateId)) generatedCodesByTemplateId.set(templateId, []);
+
+                for (const pt of parentTargets) {
+                    const parentCode = pt.code;
+                    const parentMatchValueNorm = pt.matchValue ? norm(pt.matchValue) : "";
+                    const distinct = new Set<string>();
+                    for (let i = 0; i < rowCount; i++) {
+                        if (!passesParentFilter(i, parentMatchValueNorm, parentNoNorm)) continue;
+                        const cv = norm((childArr as any[])[i]);
+                        if (!cv) continue;
+                        if (!matchesCond(cv)) continue;
+                        distinct.add(cv);
+                    }
+                    const childValues = Array.from(distinct.values()).sort((a, b) => a.localeCompare(b));
+                    for (const childValue of childValues) {
+                        const parentKeyForCode = parentCode ? parentCode : parentNo;
+                        const code = `CTA:${safeCodePart(c.id)}:${safeCodePart(parentKeyForCode)}:${safeCodePart(autoChildField)}:${safeCodePart(childValue)}`;
+                        dataLabelByCode.set(code, childValue);
+                        dataParentByCode.set(code, parentCode);
+                        const parentLvl = parentCode ? (dataRowLevelByCode.get(parentCode) ?? 0) : -1;
+                        dataRowLevelByCode.set(code, parentCode ? (parentLvl + 1) : 0);
+                        dataGroupKeyByCode.set(code, null);
+                        setRowFieldRaw(code, "Set Parent No", parentNo);
+                        const parentChildNo = parentChildId ? (childNoById.get(parentChildId) || "") : "";
+                        if (parentChildId) setRowFieldRaw(code, "Set Child", parentChildNo || parentChildId);
+                        setRowFieldRaw(code, "Child Name", childValue);
+                        setRowFieldRaw(code, "Child Name Field", autoChildField);
+                        if (parentMatchField) setRowFieldRaw(code, "Parent Match Field", parentMatchField);
 
                     const fmt = c.format;
                     if (fmt) {
@@ -6635,99 +7044,102 @@ export class Visual implements IVisual {
                         if (fmt.fontSize != null && Number.isFinite(fmt.fontSize as any)) customFontSizeByCode.set(code, Number(fmt.fontSize));
                     }
 
-                    const mappings = (Array.isArray(c.values) ? c.values : [])
-                        .map(m => ({ field: String(m.field || "").trim(), aggregation: (m.aggregation as CTAggregation) || "none" }))
-                        .filter(m => !!m.field);
-                    const effectiveMappings = expandByValue ? mappings : (mappings.length > 0 ? [mappings[0]] : []);
+                        const mappings = (Array.isArray(c.values) ? c.values : [])
+                            .map(m => ({ field: String(m.field || "").trim(), aggregation: (m.aggregation as CTAggregation) || "none" }))
+                            .filter(m => !!m.field);
+                        const effectiveMappings = expandByValue ? mappings : (mappings.length > 0 ? [mappings[0]] : []);
 
-                    for (const mm of effectiveMappings) {
-                        const fieldLabel = mm.field;
-                        const isMeasure = this.customTableFieldIsMeasure.get(fieldLabel) === true;
-                        const agg = (isMeasure ? "none" : (mm.aggregation || "none"));
+                        for (const mm of effectiveMappings) {
+                            const fieldLabel = mm.field;
+                            const isMeasure = this.customTableFieldIsMeasure.get(fieldLabel) === true;
+                            const agg = (isMeasure ? "none" : (mm.aggregation || "none"));
 
-                        for (const tupleKey of tupleKeys) {
-                            const colLevels = tupleKey ? tupleKey.split("||") : [];
-                            const colKey = expandByValue
-                                ? `${tupleKey}||__v:${String(fieldLabel || "").trim() || "Value"}`
-                                : (colKeyByTupleKey.get(tupleKey) || "");
-                            if (!colKey) continue;
+                            for (const tupleKey of tupleKeys) {
+                                const colLevels = tupleKey ? tupleKey.split("||") : [];
+                                const colKey = expandByValue
+                                    ? `${tupleKey}||__v:${String(fieldLabel || "").trim() || "Value"}`
+                                    : (colKeyByTupleKey.get(tupleKey) || "");
+                                if (!colKey) continue;
 
-                            const idxsBase = idxByColTuple.get(tupleKey) || [];
-                            const idxs: number[] = [];
-                            for (const ii of idxsBase) {
-                                if (norm((childArr as any[])[ii]) !== childValue) continue;
-                                if (parentArr && parentNoNorm) {
-                                    if (norm((parentArr as any[])[ii]) !== parentNoNorm) continue;
+                                const idxsBase = idxByColTuple.get(tupleKey) || [];
+                                const idxs: number[] = [];
+                                for (const ii of idxsBase) {
+                                    if (norm((childArr as any[])[ii]) !== childValue) continue;
+                                    if (!passesParentFilter(ii, parentMatchValueNorm, parentNoNorm)) continue;
+                                    idxs.push(ii);
                                 }
-                                idxs.push(ii);
-                            }
-                            if (idxs.length === 0) {
-                                setCfFieldRaw(code, colLevels, fieldLabel, null);
-                                continue;
-                            }
-
-                            let rawAny: any = null;
-                            let num: number | null = null;
-
-                            if (isMeasure) {
-                                const vcol = measureByLabel.get(fieldLabel);
-                                if (vcol) {
-                                    if (idxs.length === 1) {
-                                        rawAny = (vcol.values || [])[idxs[0]];
-                                    } else {
-                                        let sum = 0;
-                                        let has = false;
-                                        for (const jj of idxs) {
-                                            const vv = (vcol.values || [])[jj];
-                                            const n = toNumber(vv);
-                                            if (!Number.isFinite(n)) continue;
-                                            has = true;
-                                            sum += n;
-                                        }
-                                        rawAny = has ? sum : null;
-                                    }
-                                    const n = toNumber(rawAny);
-                                    num = Number.isFinite(n) ? n : null;
+                                if (idxs.length === 0) {
+                                    setCfFieldRaw(code, colLevels, fieldLabel, null);
+                                    continue;
                                 }
-                            } else {
-                                const arr = categoryByLabel.get(fieldLabel);
-                                if (arr) {
-                                    const nums: number[] = [];
-                                    let count = 0;
-                                    for (const jj of idxs) {
-                                        const vv = (arr || [])[jj];
-                                        if (vv == null || (typeof vv === "string" && vv.trim() === "")) {
-                                            // skip
+
+                                let rawAny: any = null;
+                                let num: number | null = null;
+
+                                if (isMeasure) {
+                                    const vcol = measureByLabel.get(fieldLabel);
+                                    if (vcol) {
+                                        if (idxs.length === 1) {
+                                            rawAny = (vcol.values || [])[idxs[0]];
                                         } else {
-                                            count++;
+                                            let sum = 0;
+                                            let has = false;
+                                            for (const jj of idxs) {
+                                                const vv = (vcol.values || [])[jj];
+                                                const n = toNumber(vv);
+                                                if (!Number.isFinite(n)) continue;
+                                                has = true;
+                                                sum += n;
+                                            }
+                                            rawAny = has ? sum : null;
                                         }
-                                        const n = toNumber(vv);
-                                        if (Number.isFinite(n)) nums.push(n);
-                                    }
-
-                                    if (agg === "count") {
-                                        rawAny = count;
-                                        num = count;
-                                    } else if (agg === "none") {
-                                        rawAny = (arr || [])[idxs[0] ?? 0];
                                         const n = toNumber(rawAny);
                                         num = Number.isFinite(n) ? n : null;
-                                    } else if (nums.length > 0) {
-                                        if (agg === "sum") num = nums.reduce((s, x) => s + x, 0);
-                                        else if (agg === "avg") num = nums.reduce((s, x) => s + x, 0) / nums.length;
-                                        else if (agg === "min") num = Math.min(...nums);
-                                        else if (agg === "max") num = Math.max(...nums);
-                                        else num = null;
-                                        rawAny = num;
+                                    }
+                                } else {
+                                    const arr = categoryByLabel.get(fieldLabel);
+                                    if (arr) {
+                                        const nums: number[] = [];
+                                        let count = 0;
+                                        for (const jj of idxs) {
+                                            const vv = (arr || [])[jj];
+                                            if (vv == null || (typeof vv === "string" && vv.trim() === "")) {
+                                                // skip
+                                            } else {
+                                                count++;
+                                            }
+                                            const n = toNumber(vv);
+                                            if (Number.isFinite(n)) nums.push(n);
+                                        }
+
+                                        if (agg === "count") {
+                                            rawAny = count;
+                                            num = count;
+                                        } else if (agg === "none") {
+                                            rawAny = (arr || [])[idxs[0] ?? 0];
+                                            const n = toNumber(rawAny);
+                                            num = Number.isFinite(n) ? n : null;
+                                        } else if (nums.length > 0) {
+                                            if (agg === "sum") num = nums.reduce((s, x) => s + x, 0);
+                                            else if (agg === "avg") num = nums.reduce((s, x) => s + x, 0) / nums.length;
+                                            else if (agg === "min") num = Math.min(...nums);
+                                            else if (agg === "max") num = Math.max(...nums);
+                                            else num = null;
+                                            rawAny = num;
+                                        }
                                     }
                                 }
-                            }
 
-                            if (rawAny != null || num != null) {
-                                setCellRaw(code, colKey, rawAny);
-                                setCell(code, colKey, num);
+                                if (rawAny != null || num != null) {
+                                    setCellRaw(code, colKey, rawAny);
+                                    setCell(code, colKey, num);
+                                }
+                                setCfFieldRaw(code, colLevels, fieldLabel, rawAny);
                             }
-                            setCfFieldRaw(code, colLevels, fieldLabel, rawAny);
+                        }
+
+                        if (templateId) {
+                            generatedCodesByTemplateId.get(templateId)!.push(code);
                         }
                     }
                 }

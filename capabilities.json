@@ -3,15 +3,56 @@
   "supportsEmptyDataView": true,
   "supportsKeyboardFocus": true,
   "supportsMultiVisualSelection": true,
+  "suppressDefaultTitle": true,
   "dataRoles": [
-    { "displayName": "Column", "name": "column", "kind": "Grouping" },
-    { "displayName": "Row", "name": "category", "kind": "Grouping" },
-    { "displayName": "Values", "name": "values", "kind": "Measure" },
-    { "displayName": "Format by (CF)", "name": "formatBy", "kind": "Measure" },
-    { "displayName": "Format by fields (CF)", "name": "formatByField", "kind": "Grouping" },
-    { "displayName": "Custom table value fields", "name": "customTableValueField", "kind": "Grouping" },
-    { "displayName": "Custom table values", "name": "customTableValue", "kind": "Measure" },
-    { "displayName": "Tooltips", "name": "tooltips", "kind": "Measure" }
+    {
+      "displayName": "Column",
+      "name": "column",
+      "kind": "Grouping",
+      "description": "Optional. Adds a column hierarchy (e.g., Year > Month > ...). Use this when you want grouped columns across the top."
+    },
+    {
+      "displayName": "Row",
+      "name": "category",
+      "kind": "Grouping",
+      "description": "Required. The main row hierarchy (e.g., Account, Segment, Product). This drives the left-side row headers."
+    },
+    {
+      "displayName": "Values",
+      "name": "values",
+      "kind": "Measure",
+      "description": "Required. Numeric measures shown in the cells (e.g., Amount, Sales, Balance). Use measures for correct totals."
+    },
+    {
+      "displayName": "Format by (CF)",
+      "name": "formatBy",
+      "kind": "Measure",
+      "description": "Optional (Conditional Formatting). Measures used as the 'Based on field' value for CF rules, gradients, and icons."
+    },
+    {
+      "displayName": "Format by fields (CF)",
+      "name": "formatByField",
+      "kind": "Grouping",
+      "description": "Optional (Conditional Formatting). Grouping fields you want to reference in CF (e.g., Status, Category, Text flags)."
+    },
+    {
+      "displayName": "Custom table fields",
+      "name": "customTableValueField",
+      "kind": "Grouping",
+      "description": "Optional (Custom Table). Fields used inside the Custom Table editor for row mapping and auto rows (From field). When Custom Table is OFF, these do not affect the normal table."
+    },
+    {
+      "displayName": "Custom table values",
+      "name": "customTableValue",
+      "kind": "Measure",
+      "description": "Optional/Recommended (Custom Table). Measures used for Custom Table row mappings. Recommended to avoid implicit aggregations. When Custom Table is OFF, these do not affect the normal table."
+    },
+    {
+      "displayName": "Tooltips",
+      "name": "tooltips",
+      "kind": "Measure",
+      "description": "Optional. Extra measures to show in the tooltip on hover (e.g., variance, YTD, previous period)."
+    }
   ],
   "objects": {
     "onboarding": {
