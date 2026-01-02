@@ -237,6 +237,11 @@ interface CTParentRow {
 interface CTChildRow {
     id: string;
     setParentNo: string;
+    // Optional: identify the child row so deeper levels can reference it.
+    childNo?: string;
+    // Optional: when set, this row becomes a sub-child (or deeper) of another CTChildRow.
+    // In this case, setParentNo is ignored for hierarchy placement.
+    parentChildId?: string;
     childName: string;
     // Optional: generate children automatically from a category field (e.g., City).
     // When set, the visual will create one child row per distinct value in this field.
@@ -1673,6 +1678,8 @@ export class Visual implements IVisual {
                 .map(c => {
                     const id = String(c?.id ?? "").trim() || cryptoId("ct");
                     const setParentNo = String(c?.setParentNo ?? "").trim();
+                    const childNo = String((c as any)?.childNo ?? "").trim();
+                    const parentChildId = String((c as any)?.parentChildId ?? "").trim();
                     const childName = String(c?.childName ?? "").trim();
                     const childNameFromField = String((c as any)?.childNameFromField ?? "").trim();
                     const parentMatchField = String((c as any)?.parentMatchField ?? "").trim();
@@ -1683,7 +1690,17 @@ export class Visual implements IVisual {
                             aggregation: normAgg(v?.aggregation)
                         }))
                         .filter(v => !!v.field);
-                    return { id, setParentNo, childName, childNameFromField: childNameFromField || undefined, parentMatchField: parentMatchField || undefined, values, format: normFormat(c?.format) };
+                    return {
+                        id,
+                        setParentNo,
+                        childNo: childNo || undefined,
+                        parentChildId: parentChildId || undefined,
+                        childName,
+                        childNameFromField: childNameFromField || undefined,
+                        parentMatchField: parentMatchField || undefined,
+                        values,
+                        format: normFormat(c?.format)
+                    };
                 })
                 .filter(c => !!c.childName || !!c.childNameFromField);
 
@@ -2137,16 +2154,104 @@ export class Visual implements IVisual {
 
         const renderChildren = () => {
             childrenList.textContent = "";
-            for (let i = 0; i < draft.children.length; i++) {
-                const c = draft.children[i];
+            const all: any[] = Array.isArray(draft.children) ? (draft.children as any[]) : [];
+
+            const byId = new Map<string, any>();
+            for (const c of all) {
+                const id = String(c?.id || "").trim();
+                if (id) byId.set(id, c);
+            }
+
+            const childrenByParentId = new Map<string, any[]>();
+            const roots: any[] = [];
+            for (const c of all) {
+                const pid = String(c?.parentChildId || "").trim();
+                if (pid && byId.has(pid)) {
+                    if (!childrenByParentId.has(pid)) childrenByParentId.set(pid, []);
+                    childrenByParentId.get(pid)!.push(c);
+                } else {
+                    roots.push(c);
+                }
+            }
+
+            const sortByChildNoThenName = (arr: any[]) => {
+                arr.sort((a, b) => {
+                    const an = String(a?.childNo || "").trim();
+                    const bn = String(b?.childNo || "").trim();
+                    if (an && bn) {
+                        const c = an.localeCompare(bn);
+                        if (c !== 0) return c;
+                    }
+                    if (an && !bn) return -1;
+                    if (!an && bn) return 1;
+                    const al = String(a?.childName || "").trim();
+                    const bl = String(b?.childName || "").trim();
+                    return al.localeCompare(bl);
+                });
+            };
+            sortByChildNoThenName(roots);
+            for (const arr of childrenByParentId.values()) sortByChildNoThenName(arr);
+
+            const collectSubtreeIds = (rootId: string): Set<string> => {
+                const out = new Set<string>();
+                const walk = (id: string) => {
+                    if (!id || out.has(id)) return;
+                    out.add(id);
+                    const kids = childrenByParentId.get(id) || [];
+                    for (const k of kids) walk(String(k?.id || "").trim());
+                };
+                walk(rootId);
+                return out;
+            };
+
+            const makeChildParentSelect = (value: string, excludeIds?: Set<string>): FancySelect => {
+                const s = makeSelect();
+                addOption(s.select, "", "(Select child)");
+                const want = String(value || "").trim();
+                for (const c of all) {
+                    const id = String(c?.id || "").trim();
+                    if (!id) continue;
+                    if (excludeIds && excludeIds.has(id)) continue;
+                    // Avoid using auto-generated template rows as a parent for nesting (ambiguous),
+                    // but keep the currently-selected one visible for backward compatibility.
+                    const isAuto = !!String((c as any)?.childNameFromField || "").trim();
+                    if (isAuto && id !== want) continue;
+                    const no = String(c?.childNo || "").trim();
+                    const nm = String(c?.childName || "").trim();
+                    const autoLabel = isAuto ? ` (Auto: ${String((c as any)?.childNameFromField || "").trim() || "field"})` : "";
+                    const label = (no ? `${no} — ` : "(Set Child No) — ") + (nm || "(Blank)") + autoLabel;
+                    addOption(s.select, id, label);
+                }
+                s.setValue(value || "");
+                s.syncFromSelect();
+                return s;
+            };
+
+            const removeByIds = (ids: Set<string>) => {
+                draft.children = (Array.isArray(draft.children) ? draft.children : []).filter((x: any) => !ids.has(String(x?.id || "").trim()));
+                for (const c of (draft.children as any[])) {
+                    const pid = String(c?.parentChildId || "").trim();
+                    if (pid && ids.has(pid)) c.parentChildId = "";
+                }
+            };
+
+            const renderNode = (c: any): HTMLDivElement => {
+                const cId = String(c?.id || "").trim() || cryptoId("ctc");
+                c.id = cId;
+
                 const row = document.createElement("div");
                 row.className = "fm-ct-child fm-ct-card";
 
                 const top = document.createElement("div");
                 top.className = "fm-ct-child-top";
 
-                const parentSel = makeParentNoSelect(c.setParentNo);
-                const childName = makeTextInput(c.childName, "Child Name");
+                const isNested = !!String(c?.parentChildId || "").trim();
+                const parentSel = isNested
+                    ? makeChildParentSelect(String(c?.parentChildId || "").trim(), collectSubtreeIds(cId))
+                    : makeParentNoSelect(String(c?.setParentNo || "").trim());
+
+                const childNo = makeTextInput(String(c?.childNo || "").trim(), "Child No");
+                const childName = makeTextInput(String(c?.childName || "").trim(), "Child Name");
 
                 const autoChk = document.createElement("input");
                 autoChk.type = "checkbox";
@@ -2211,7 +2316,16 @@ export class Visual implements IVisual {
                 boldWrap.appendChild(boldTxt);
 
                 parentSel.select.onchange = () => {
-                    c.setParentNo = parentSel.getValue();
+                    if (isNested) {
+                        c.parentChildId = String(parentSel.getValue() || "").trim() || undefined;
+                        c.setParentNo = "";
+                    } else {
+                        c.setParentNo = parentSel.getValue();
+                        c.parentChildId = undefined;
+                    }
+                };
+                childNo.oninput = () => {
+                    c.childNo = String(childNo.value || "").trim() || undefined;
                 };
                 childName.oninput = () => {
                     c.childName = childName.value;
@@ -2240,11 +2354,13 @@ export class Visual implements IVisual {
                 del.textContent = "✕";
                 del.title = "Remove";
                 del.onclick = () => {
-                    draft.children.splice(i, 1);
+                    const ids = collectSubtreeIds(cId);
+                    removeByIds(ids);
                     renderChildren();
                 };
 
-                top.appendChild(wrapField("Parent", parentSel.host));
+                top.appendChild(wrapField(isNested ? "Child" : "Parent", parentSel.host));
+                top.appendChild(wrapField("Child No", childNo));
                 top.appendChild(wrapField("Child name", childName));
                 top.appendChild(wrapField("Auto", autoWrap));
                 top.appendChild(childFieldWrap);
@@ -2349,7 +2465,54 @@ export class Visual implements IVisual {
 
                 renderMappings();
                 row.appendChild(mappings);
-                childrenList.appendChild(row);
+
+                const kids = childrenByParentId.get(cId) || [];
+                const subWrap = document.createElement("div");
+                subWrap.className = "fm-ct-mappings";
+
+                const subHeader = document.createElement("div");
+                subHeader.className = "fm-ct-map";
+
+                const subTitle = document.createElement("div");
+                subTitle.className = "fm-cf-label";
+                subTitle.textContent = "Sub-children";
+
+                const addSubBtn = document.createElement("button");
+                addSubBtn.className = "fm-cf-btn";
+                addSubBtn.textContent = "Add sub-child";
+                addSubBtn.onclick = () => {
+                    const nid = cryptoId("ctc");
+                    (draft.children as any[]).push({
+                        id: nid,
+                        setParentNo: "",
+                        parentChildId: cId,
+                        childNo: "",
+                        childName: "",
+                        childNameFromField: undefined,
+                        parentMatchField: undefined,
+                        values: [{ field: "", aggregation: "none" }]
+                    } as any);
+                    renderChildren();
+                };
+
+                // If this row is auto-generated template, nesting is ambiguous; hide CTA to avoid confusion.
+                const isAutoRow = !!String((c as any)?.childNameFromField || "").trim();
+                if (isAutoRow) addSubBtn.style.display = "none";
+
+                subHeader.appendChild(subTitle);
+                subHeader.appendChild(addSubBtn);
+                subWrap.appendChild(subHeader);
+
+                for (const k of kids) {
+                    subWrap.appendChild(renderNode(k));
+                }
+                row.appendChild(subWrap);
+
+                return row;
+            };
+
+            for (const c of roots) {
+                childrenList.appendChild(renderNode(c));
             }
         };
 
@@ -2357,7 +2520,7 @@ export class Visual implements IVisual {
         addChildBtn.className = "fm-cf-btn";
         addChildBtn.textContent = "Add child";
         addChildBtn.onclick = () => {
-            draft.children.push({ id: cryptoId("ctc"), setParentNo: "", childName: "", childNameFromField: undefined, parentMatchField: undefined, values: [{ field: "", aggregation: "none" }] } as any);
+            draft.children.push({ id: cryptoId("ctc"), setParentNo: "", parentChildId: undefined, childNo: "", childName: "", childNameFromField: undefined, parentMatchField: undefined, values: [{ field: "", aggregation: "none" }] } as any);
             renderChildren();
         };
         childrenWrap.appendChild(addChildBtn);
@@ -2426,6 +2589,8 @@ export class Visual implements IVisual {
                 .map(c => ({
                     id: String(c.id || "").trim() || cryptoId("ctc"),
                     setParentNo: String(c.setParentNo || "").trim(),
+                    parentChildId: String((c as any).parentChildId || "").trim() || undefined,
+                    childNo: String((c as any).childNo || "").trim() || undefined,
                     childName: String(c.childName || "").trim(),
                     childNameFromField: String((c as any).childNameFromField || "").trim() || undefined,
                     parentMatchField: String((c as any).parentMatchField || "").trim() || undefined,
@@ -6406,11 +6571,28 @@ export class Visual implements IVisual {
             }
         }
 
+        // Manual child row codes (used for nested sub-child placement).
+        const childCodeById = new Map<string, string>();
+        const childNoById = new Map<string, string>();
+        for (const c of (cfg.children || [])) {
+            const autoChildField = String((c as any).childNameFromField || "").trim();
+            if (autoChildField) continue;
+            const id = String((c as any).id || "").trim();
+            if (!id) continue;
+            const code = `CTC:${id}`;
+            if (!childCodeById.has(id)) childCodeById.set(id, code);
+            const cn = String((c as any).childNo || "").trim();
+            if (cn && !childNoById.has(id)) childNoById.set(id, cn);
+        }
+
         for (const c of (cfg.children || [])) {
             const autoChildField = String((c as any).childNameFromField || "").trim();
             if (autoChildField) {
                 const parentNo = String(c.setParentNo || "").trim();
-                const parentCode = parentNo ? (parentCodeByNo.get(parentNo) || null) : null;
+                const parentChildId = String((c as any).parentChildId || "").trim();
+                const parentCode = parentChildId
+                    ? (childCodeById.get(parentChildId) || null)
+                    : (parentNo ? (parentCodeByNo.get(parentNo) || null) : null);
                 const childArr = categoryByLabel.get(autoChildField) || null;
                 const parentMatchField = String((c as any).parentMatchField || "").trim();
                 const parentArr = parentMatchField ? (categoryByLabel.get(parentMatchField) || null) : null;
@@ -6431,9 +6613,12 @@ export class Visual implements IVisual {
                     const code = `CTA:${safeCodePart(c.id)}:${safeCodePart(parentNo)}:${safeCodePart(autoChildField)}:${safeCodePart(childValue)}`;
                     dataLabelByCode.set(code, childValue);
                     dataParentByCode.set(code, parentCode);
-                    dataRowLevelByCode.set(code, parentCode ? 1 : 0);
+                    const parentLvl = parentCode ? (dataRowLevelByCode.get(parentCode) ?? 0) : -1;
+                    dataRowLevelByCode.set(code, parentCode ? (parentLvl + 1) : 0);
                     dataGroupKeyByCode.set(code, null);
                     setRowFieldRaw(code, "Set Parent No", parentNo);
+                    const parentChildNo = parentChildId ? (childNoById.get(parentChildId) || "") : "";
+                    if (parentChildId) setRowFieldRaw(code, "Set Child", parentChildNo || parentChildId);
                     setRowFieldRaw(code, "Child Name", childValue);
                     setRowFieldRaw(code, "Child Name Field", autoChildField);
                     if (parentMatchField) setRowFieldRaw(code, "Parent Match Field", parentMatchField);
@@ -6549,14 +6734,23 @@ export class Visual implements IVisual {
                 continue;
             }
 
-            const code = `CTC:${String(c.id || "").trim() || cryptoId("ctc")}`;
+            const id = String(c.id || "").trim() || cryptoId("ctc");
+            const code = `CTC:${id}`;
             const parentNo = String(c.setParentNo || "").trim();
-            const parentCode = parentNo ? (parentCodeByNo.get(parentNo) || null) : null;
+            const parentChildId = String((c as any).parentChildId || "").trim();
+            const parentCode = parentChildId
+                ? (childCodeById.get(parentChildId) || null)
+                : (parentNo ? (parentCodeByNo.get(parentNo) || null) : null);
             dataLabelByCode.set(code, String(c.childName || "").trim() || "(Blank)");
             dataParentByCode.set(code, parentCode);
-            dataRowLevelByCode.set(code, parentCode ? 1 : 0);
+            const parentLvl = parentCode ? (dataRowLevelByCode.get(parentCode) ?? 0) : -1;
+            dataRowLevelByCode.set(code, parentCode ? (parentLvl + 1) : 0);
             dataGroupKeyByCode.set(code, null);
             setRowFieldRaw(code, "Set Parent No", parentNo);
+            const childNo = String((c as any).childNo || "").trim();
+            if (childNo) setRowFieldRaw(code, "Child No", childNo);
+            const parentChildNo = parentChildId ? (childNoById.get(parentChildId) || "") : "";
+            if (parentChildId) setRowFieldRaw(code, "Set Child", parentChildNo || parentChildId);
             setRowFieldRaw(code, "Child Name", String(c.childName || "").trim());
 
             const fmt = c.format;
