@@ -779,6 +779,12 @@ select.fm-cf-select:focus {
   transform: translateY(-1px);
 }
 
+.fm-cf-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .fm-cf-btn-primary {
   background: var(--fm-editor-btn-primary);
   border-color: var(--fm-editor-btn-primary);
@@ -866,6 +872,30 @@ select.fm-cf-select:focus {
 .fm-ct-mappings {
   display: grid;
   gap: 8px;
+}
+
+/* Sub-children section: make it obvious and easy to find */
+.fm-ct-sub {
+  border-top: 1px dashed var(--fm-editor-divider);
+  padding-top: 10px;
+}
+
+.fm-ct-sub-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fm-ct-sub-title {
+  font-weight: 700;
+}
+
+/* Indent nested sub-children cards */
+.fm-ct-sub > .fm-ct-child {
+  margin-left: 14px;
+  border-left: 3px solid var(--fm-editor-header-bg);
+  padding-left: 10px;
 }
 
 .fm-ct-map {
