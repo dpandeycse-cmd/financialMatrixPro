@@ -908,6 +908,7 @@ export class Visual implements IVisual {
         // Show landing message when required roles are missing; hide as soon as ready.
         const ctCard: any = (this.formattingSettings as any).customTable;
         const customTableEnabled = (ctCard?.enabled?.value as boolean | undefined) ?? false;
+        const customTableShowEditor = (ctCard?.showEditor?.value as boolean | undefined) ?? false;
 
         // If nothing is bound at all, Power BI may still provide a DataView shell.
         // Use categorical presence (not metadata fallback) to decide the landing state.
@@ -918,6 +919,14 @@ export class Visual implements IVisual {
 
         if (!hasAnyCategoricalBound) {
             this.hideLanding();
+            // Allow opening the Custom Table editor even before bindings exist.
+            if (customTableEnabled && customTableShowEditor) {
+                this.root.style.width = `${options.viewport.width}px`;
+                this.root.style.height = `${options.viewport.height}px`;
+                this.clearRoot();
+                this.renderCustomTableEditor();
+                return;
+            }
             this.renderEmptyState(options.viewport, { reason: "missingBindings", missingRow: true, missingValues: true });
             return;
         }
@@ -931,7 +940,12 @@ export class Visual implements IVisual {
             });
             if (!hasAnyValue) {
                 this.hideLanding();
+                this.root.style.width = `${options.viewport.width}px`;
+                this.root.style.height = `${options.viewport.height}px`;
                 this.clearRoot();
+                if (customTableShowEditor) {
+                    this.renderCustomTableEditor();
+                }
                 return;
             }
         } else {
