@@ -217,7 +217,7 @@ interface CFConfig {
 
 type CTAggregation = "none" | "sum" | "avg" | "min" | "max" | "count";
 
-type CTTextOperator = "contains" | "equals" | "notEquals";
+type CTTextOperator = "contains" | "equals" | "notEquals" | "in" | "notIn";
 
 type CTParentFilterMode = "include" | "exclude";
 
@@ -307,6 +307,13 @@ function addOption(select: HTMLSelectElement, value: string, label: string): voi
     select.appendChild(opt);
 }
 
+function splitCsvValues(raw: string): string[] {
+    return String(raw || "")
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
+}
+
 interface FancySelect {
     host: HTMLDivElement;
     select: HTMLSelectElement;
@@ -340,12 +347,28 @@ function createFancySelect(hostClassName: string = "fm-cf-select"): FancySelect 
 
     let isOpen = false;
     let suppressDocHandler = false;
+    let stackHost: HTMLElement | null = null;
+
+    const applyStackingFix = (enable: boolean) => {
+        if (enable) {
+            // When the dropdown opens inside a card, make that card stack above later siblings.
+            // This avoids the menu being covered by the next section due to stacking contexts (e.g., transforms on hover).
+            stackHost = (host.closest(".fm-ct-card") as HTMLElement | null)
+                || (host.closest(".fm-cf-panel") as HTMLElement | null)
+                || host;
+            stackHost.classList.add("fm-dd-stack-top");
+        } else {
+            if (stackHost) stackHost.classList.remove("fm-dd-stack-top");
+            stackHost = null;
+        }
+    };
 
     const close = () => {
         if (!isOpen) return;
         isOpen = false;
         menu.hidden = true;
         host.classList.remove("fm-dd-open");
+        applyStackingFix(false);
         button.setAttribute("aria-expanded", "false");
         document.removeEventListener("mousedown", onDocMouseDown, true);
         document.removeEventListener("keydown", onDocKeyDown, true);
@@ -357,6 +380,7 @@ function createFancySelect(hostClassName: string = "fm-cf-select"): FancySelect 
         syncFromSelect();
         menu.hidden = false;
         host.classList.add("fm-dd-open");
+        applyStackingFix(true);
         button.setAttribute("aria-expanded", "true");
         suppressDocHandler = true;
         document.addEventListener("mousedown", onDocMouseDown, true);
@@ -803,6 +827,14 @@ export class Visual implements IVisual {
     private landingEl: HTMLDivElement | null = null;
     private pendingCustomTableJson: string | null = null;
     private pendingCustomTableSetAt: number = 0;
+    private isInFocusMode: boolean = false;
+    private ctFocusModeForced: boolean = false;
+    private cfFocusModeForced: boolean = false;
+
+    private readonly sessionKeys = {
+        cfDraft: "fm_cf_editor_draft_v1",
+        ctDraft: "fm_ct_editor_draft_v1"
+    };
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -848,6 +880,100 @@ export class Visual implements IVisual {
         }
 
         this.ensureLandingOverlay();
+    }
+
+    private trySessionGet(key: string): string | null {
+        try {
+            const s: any = (window as any)?.sessionStorage;
+            return s && typeof s.getItem === "function" ? (s.getItem(key) as string | null) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    private trySessionSet(key: string, value: string): void {
+        try {
+            const s: any = (window as any)?.sessionStorage;
+            if (s && typeof s.setItem === "function") s.setItem(key, value);
+        } catch {
+            // ignore
+        }
+    }
+
+    private trySessionRemove(key: string): void {
+        try {
+            const s: any = (window as any)?.sessionStorage;
+            if (s && typeof s.removeItem === "function") s.removeItem(key);
+        } catch {
+            // ignore
+        }
+    }
+
+    private trySwitchFocusModeState(on: boolean): boolean {
+        try {
+            const hostAny: any = this.host as any;
+            if (hostAny && typeof hostAny.switchFocusModeState === "function") {
+                hostAny.switchFocusModeState(!!on);
+                return true;
+            }
+        } catch {
+            // ignore
+        }
+        return false;
+    }
+
+    private loadCfDraftFromSession(): CFConfig | null {
+        const raw = this.trySessionGet(this.sessionKeys.cfDraft);
+        if (!raw) return null;
+        try {
+            const parsed = JSON.parse(raw || "") as any;
+            const base = String(parsed?.base || "");
+            if (base !== String(this.cfRulesJson || "")) return null;
+            const draft = parsed?.draft;
+            if (!draft || typeof draft !== "object") return null;
+            return this.safeParseCfConfig(JSON.stringify(draft));
+        } catch {
+            return null;
+        }
+    }
+
+    private saveCfDraftToSession(draft: CFConfig): void {
+        try {
+            this.trySessionSet(this.sessionKeys.cfDraft, JSON.stringify({ base: String(this.cfRulesJson || ""), draft }));
+        } catch {
+            // ignore
+        }
+    }
+
+    private clearCfDraftSession(): void {
+        this.trySessionRemove(this.sessionKeys.cfDraft);
+    }
+
+    private loadCustomTableDraftFromSession(): CustomTableConfig | null {
+        const raw = this.trySessionGet(this.sessionKeys.ctDraft);
+        if (!raw) return null;
+        try {
+            const parsed = JSON.parse(raw || "") as any;
+            const base = String(parsed?.base || "");
+            if (base !== String(this.customTableJson || "")) return null;
+            const draft = parsed?.draft;
+            if (!draft || typeof draft !== "object") return null;
+            return this.safeParseCustomTableConfig(JSON.stringify(draft));
+        } catch {
+            return null;
+        }
+    }
+
+    private saveCustomTableDraftToSession(draft: CustomTableConfig): void {
+        try {
+            this.trySessionSet(this.sessionKeys.ctDraft, JSON.stringify({ base: String(this.customTableJson || ""), draft }));
+        } catch {
+            // ignore
+        }
+    }
+
+    private clearCustomTableDraftSession(): void {
+        this.trySessionRemove(this.sessionKeys.ctDraft);
     }
 
     private showTooltip(ev: MouseEvent, items: powerbi.extensibility.VisualTooltipDataItem[], selectionId?: powerbi.extensibility.ISelectionId | null): void {
@@ -911,6 +1037,7 @@ export class Visual implements IVisual {
     }
 
     public update(options: VisualUpdateOptions): void {
+        this.isInFocusMode = options.isInFocus === true;
         const dataView = options.dataViews && options.dataViews[0];
         if (!dataView) {
             this.lastViewport = options.viewport;
@@ -1658,12 +1785,18 @@ export class Visual implements IVisual {
 
     private ensureCfDraft(): CFConfig {
         if (this.cfEditorDraft) return this.cfEditorDraft;
-        this.cfEditorDraft = this.safeParseCfConfig(this.cfRulesJson);
+        const fromSession = this.loadCfDraftFromSession();
+        this.cfEditorDraft = fromSession || this.safeParseCfConfig(this.cfRulesJson);
         return this.cfEditorDraft;
     }
 
     private closeCfEditor(): void {
         this.cfEditorDraft = null;
+        this.clearCfDraftSession();
+        if (this.cfFocusModeForced) {
+            this.trySwitchFocusModeState(false);
+            this.cfFocusModeForced = false;
+        }
         // Turn off the formatting toggle so the pane doesn't stay ON.
         this.persistObjectProperties("conditionalFormatting", { showEditor: false });
         // Re-render using existing persisted rules.
@@ -1750,7 +1883,7 @@ export class Visual implements IVisual {
                     const parentFilterMode: CTParentFilterMode | undefined = (parentFilterModeRaw === "exclude") ? "exclude" : undefined;
                     const conditionalMappingEnabled = (c as any)?.conditionalMappingEnabled === true;
                     const conditionalMappingOperatorRaw = String((c as any)?.conditionalMappingOperator ?? "").trim();
-                    const conditionalMappingOperator: CTTextOperator = (conditionalMappingOperatorRaw === "equals" || conditionalMappingOperatorRaw === "notEquals" || conditionalMappingOperatorRaw === "contains")
+                    const conditionalMappingOperator: CTTextOperator = (conditionalMappingOperatorRaw === "equals" || conditionalMappingOperatorRaw === "notEquals" || conditionalMappingOperatorRaw === "contains" || conditionalMappingOperatorRaw === "in" || conditionalMappingOperatorRaw === "notIn")
                         ? (conditionalMappingOperatorRaw as CTTextOperator)
                         : "contains";
                     const conditionalMappingValue = String((c as any)?.conditionalMappingValue ?? "").trim();
@@ -1851,17 +1984,27 @@ export class Visual implements IVisual {
 
     private ensureCustomTableDraft(): CustomTableConfig {
         if (this.customTableEditorDraft) return this.customTableEditorDraft;
-        this.customTableEditorDraft = this.safeParseCustomTableConfig(this.customTableJson);
+        const fromSession = this.loadCustomTableDraftFromSession();
+        this.customTableEditorDraft = fromSession || this.safeParseCustomTableConfig(this.customTableJson);
         return this.customTableEditorDraft;
     }
 
     private closeCustomTableEditor(): void {
         this.customTableEditorDraft = null;
+        this.clearCustomTableDraftSession();
+        if (this.ctFocusModeForced) {
+            this.trySwitchFocusModeState(false);
+            this.ctFocusModeForced = false;
+        }
         this.persistObjectProperties("customTable", { showEditor: false });
     }
 
     private openCustomTableEditor(): void {
         this.ensureCustomTableDraft();
+        if (!this.isInFocusMode) {
+            const ok = this.trySwitchFocusModeState(true);
+            if (ok) this.ctFocusModeForced = true;
+        }
         this.persistObjectProperties("customTable", { showEditor: true });
     }
 
@@ -1880,6 +2023,23 @@ export class Visual implements IVisual {
         panel.className = "fm-cf-panel fm-ct-panel";
         overlay.appendChild(panel);
 
+        // Save initial draft snapshot.
+        this.saveCustomTableDraftToSession(draft);
+
+        // Attach debounced autosave listeners.
+        {
+            let t: any = null;
+            const schedule = () => {
+                if (t) return;
+                t = setTimeout(() => {
+                    t = null;
+                    this.saveCustomTableDraftToSession(draft);
+                }, 150);
+            };
+            panel.addEventListener("input", schedule);
+            panel.addEventListener("change", schedule);
+        }
+
         const header = document.createElement("div");
         header.className = "fm-cf-header";
         panel.appendChild(header);
@@ -1891,7 +2051,7 @@ export class Visual implements IVisual {
 
         const note = document.createElement("div");
         note.className = "fm-cf-style-note";
-        note.textContent = "Define a custom Parent/Child hierarchy and pick measures/columns for values. Aggregation is disabled for measures (Power BI handles measures automatically).";
+        note.textContent = "Define a custom Parent/Child hierarchy and pick measures/columns for values. Aggregation is disabled for measures (Power BI handles measures automatically). Tip: for more space, open this visual in Focus mode.";
         header.appendChild(note);
 
         if (draft.showValueNamesInColumns == null) draft.showValueNamesInColumns = false;
@@ -2399,7 +2559,6 @@ export class Visual implements IVisual {
                 autoWrap.appendChild(autoTxt);
 
                 const childFieldSel = makeCategoryFieldSelect(String((c as any).childNameFromField || "").trim(), "Child name field");
-                const parentMatchSel = makeCategoryFieldSelect(String((c as any).parentMatchField || "").trim(), "(Optional) Parent match field");
 
                 const parentFilterWrap = document.createElement("label");
                 parentFilterWrap.className = "fm-ct-bold";
@@ -2411,18 +2570,26 @@ export class Visual implements IVisual {
                 parentFilterTxt.textContent = "Parent filter apply";
                 parentFilterWrap.appendChild(parentFilterTxt);
 
-                const parentFilterModeSel = makeSelect();
-                addOption(parentFilterModeSel.select, "include", "Include parent value");
-                addOption(parentFilterModeSel.select, "exclude", "Exclude parent value");
+                // Nested sub-children: include is the default behavior when Parent filter apply is ON.
+                // We only expose Exclude as an explicit option.
+                const parentExcludeWrap = document.createElement("label");
+                parentExcludeWrap.className = "fm-ct-bold";
+                const parentExcludeChk = document.createElement("input");
+                parentExcludeChk.type = "checkbox";
                 const pfModeRaw = String((c as any).parentFilterMode || "").trim();
-                const pfMode = (pfModeRaw === "exclude") ? "exclude" : "include";
-                parentFilterModeSel.setValue(pfMode);
-                parentFilterModeSel.syncFromSelect();
+                parentExcludeChk.checked = pfModeRaw === "exclude";
+                parentExcludeWrap.appendChild(parentExcludeChk);
+                const parentExcludeTxt = document.createElement("span");
+                parentExcludeTxt.textContent = "Exclude parent value";
+                parentExcludeWrap.appendChild(parentExcludeTxt);
 
                 const childFieldWrap = wrapField("Child name field", childFieldSel.host);
-                const parentMatchWrap = wrapField("Parent match field", parentMatchSel.host);
-                const parentFilterWrapField = wrapField("", parentFilterWrap);
-                const parentFilterModeWrap = wrapField("", parentFilterModeSel.host);
+                const parentFilterRow = document.createElement("div");
+                parentFilterRow.className = "fm-ct-inline-row";
+                const parentFilterApplyField = wrapField("Filter apply", parentFilterWrap);
+                const parentFilterExcludeField = wrapField("Parent value", parentExcludeWrap);
+                parentFilterRow.appendChild(parentFilterApplyField);
+                parentFilterRow.appendChild(parentFilterExcludeField);
 
                 const condWrap = document.createElement("label");
                 condWrap.className = "fm-ct-bold";
@@ -2438,27 +2605,33 @@ export class Visual implements IVisual {
                 addOption(condOpSel.select, "contains", "Contains");
                 addOption(condOpSel.select, "equals", "Equals");
                 addOption(condOpSel.select, "notEquals", "Not equal");
+                addOption(condOpSel.select, "in", "In");
+                addOption(condOpSel.select, "notIn", "Not in");
                 const condOpRaw = String((c as any).conditionalMappingOperator || "").trim();
-                const condOp = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals") ? condOpRaw : "contains";
+                const condOp = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals" || condOpRaw === "in" || condOpRaw === "notIn") ? condOpRaw : "contains";
                 condOpSel.setValue(condOp);
                 condOpSel.syncFromSelect();
 
                 const condValInp = makeTextInput(String((c as any).conditionalMappingValue || "").trim(), "");
 
                 const condOpWrap = wrapField("Operator", condOpSel.host);
-                const condValWrap = wrapField("", condValInp);
+                const condValWrap = wrapField("Text/Value", condValInp);
+
+                // Layout classes (CSS places these in a stable grid)
+                condOpWrap.classList.add("fm-ct-op-field");
+                condValWrap.classList.add("fm-ct-op-value-field");
 
                 const syncAutoUi = () => {
                     const enabled = autoChk.checked;
-                    childFieldWrap.style.display = enabled ? "" : "none";
-                    // Parent match field is intentionally hidden (too confusing for users right now).
-                    parentMatchWrap.style.display = "none";
-                    parentFilterWrapField.style.display = (enabled && isNested) ? "" : "none";
-                    parentFilterModeWrap.style.display = (enabled && isNested && parentFilterChk.checked) ? "" : "none";
+                    // Never hide controls; only enable/disable so layout stays stable.
+                    childFieldSel.select.disabled = !enabled;
+                    parentFilterChk.disabled = !(enabled && isNested);
+                    parentExcludeChk.disabled = !(enabled && isNested && parentFilterChk.checked);
+
                     const condEnabled = enabled;
-                    condOpWrap.style.display = (condEnabled && condChk.checked) ? "" : "none";
-                    condValWrap.style.display = (condEnabled && condChk.checked) ? "" : "none";
-                    condWrap.style.display = condEnabled ? "" : "none";
+                    condChk.disabled = !condEnabled;
+                    condOpSel.select.disabled = !(condEnabled && condChk.checked);
+                    condValInp.disabled = !(condEnabled && condChk.checked);
                     childName.disabled = enabled;
                     if (enabled) {
                         c.childName = "";
@@ -2522,10 +2695,8 @@ export class Visual implements IVisual {
                 autoChk.onchange = () => {
                     if (autoChk.checked) {
                         (c as any).childNameFromField = String(childFieldSel.getValue() || "").trim() || undefined;
-                        (c as any).parentMatchField = String(parentMatchSel.getValue() || "").trim() || undefined;
                     } else {
                         (c as any).childNameFromField = undefined;
-                        (c as any).parentMatchField = undefined;
                         (c as any).parentFilterApply = undefined;
                         (c as any).parentFilterMode = undefined;
                         (c as any).inheritParentFilter = undefined;
@@ -2539,17 +2710,13 @@ export class Visual implements IVisual {
                     (c as any).inheritParentFilter = undefined;
                     syncAutoUi();
                 };
-                parentFilterModeSel.select.onchange = () => {
-                    const v = String(parentFilterModeSel.getValue() || "").trim();
-                    (c as any).parentFilterMode = (v === "exclude") ? "exclude" : undefined;
+                parentExcludeChk.onchange = () => {
+                    (c as any).parentFilterMode = parentExcludeChk.checked ? "exclude" : undefined;
                     (c as any).inheritParentFilter = undefined;
                 };
 
                 childFieldSel.select.onchange = () => {
                     (c as any).childNameFromField = String(childFieldSel.getValue() || "").trim() || undefined;
-                };
-                parentMatchSel.select.onchange = () => {
-                    (c as any).parentMatchField = String(parentMatchSel.getValue() || "").trim() || undefined;
                 };
 
                 condChk.onchange = () => {
@@ -2558,7 +2725,7 @@ export class Visual implements IVisual {
                 };
                 condOpSel.select.onchange = () => {
                     const v = String(condOpSel.getValue() || "").trim();
-                    (c as any).conditionalMappingOperator = (v === "contains" || v === "equals" || v === "notEquals") ? (v as any) : "contains";
+                    (c as any).conditionalMappingOperator = (v === "contains" || v === "equals" || v === "notEquals" || v === "in" || v === "notIn") ? (v as any) : "contains";
                 };
                 condValInp.oninput = () => {
                     const v = String(condValInp.value || "");
@@ -2575,21 +2742,43 @@ export class Visual implements IVisual {
                     renderChildren();
                 };
 
-                top.appendChild(wrapField(isNested ? "Child" : "Parent", parentSel.host));
-                top.appendChild(wrapField("Child No", childNo));
-                top.appendChild(wrapField("Child name", childName));
-                top.appendChild(wrapField("Auto", autoWrap));
+                const parentWrap = wrapField(isNested ? "Child" : "Parent", parentSel.host);
+                parentWrap.classList.add("fm-ct-parent-field");
+                const childNoWrap = wrapField("Child No", childNo);
+                childNoWrap.classList.add("fm-ct-childno-field");
+                const childNameWrap = wrapField("Child name", childName);
+                childNameWrap.classList.add("fm-ct-childname-field");
+                const autoWrapField = wrapField("Auto", autoWrap);
+                autoWrapField.classList.add("fm-ct-auto-field");
+
+                childFieldWrap.classList.add("fm-ct-childfield-field");
+                parentFilterRow.classList.add("fm-ct-parentfilter-row-field");
+
+                const conditionalWrap = wrapField("Conditional", condWrap);
+                conditionalWrap.classList.add("fm-ct-conditional-field");
+
+                const fontWrap = wrapField("Font", font.host);
+                fontWrap.classList.add("fm-ct-font-field");
+                const sizeWrap = wrapField("Size", size);
+                sizeWrap.classList.add("fm-ct-size-field");
+                const colorWrap = wrapField("Color", color);
+                colorWrap.classList.add("fm-ct-color-field");
+                const boldWrapField = wrapField("Bold", boldWrap);
+                boldWrapField.classList.add("fm-ct-bold-field");
+
+                top.appendChild(parentWrap);
+                top.appendChild(childNoWrap);
+                top.appendChild(childNameWrap);
+                top.appendChild(autoWrapField);
                 top.appendChild(childFieldWrap);
-                top.appendChild(parentMatchWrap);
-                top.appendChild(parentFilterWrapField);
-                top.appendChild(parentFilterModeWrap);
-                top.appendChild(wrapField("Conditional", condWrap));
+                top.appendChild(parentFilterRow);
+                top.appendChild(conditionalWrap);
                 top.appendChild(condOpWrap);
                 top.appendChild(condValWrap);
-                top.appendChild(wrapField("Font", font.host));
-                top.appendChild(wrapField("Size", size));
-                top.appendChild(wrapField("Color", color));
-                top.appendChild(wrapField("Bold", boldWrap));
+                top.appendChild(fontWrap);
+                top.appendChild(sizeWrap);
+                top.appendChild(colorWrap);
+                top.appendChild(boldWrapField);
 
                 const topActions = document.createElement("div");
                 topActions.className = "fm-ct-row-actions";
@@ -2819,7 +3008,7 @@ export class Visual implements IVisual {
                     conditionalMappingOperator: (() => {
                         if ((c as any).conditionalMappingEnabled !== true) return undefined;
                         const raw = String((c as any).conditionalMappingOperator || "contains").trim();
-                        return (raw === "contains" || raw === "equals" || raw === "notEquals") ? (raw as any) : "contains";
+                        return (raw === "contains" || raw === "equals" || raw === "notEquals" || raw === "in" || raw === "notIn") ? (raw as any) : "contains";
                     })(),
                     conditionalMappingValue: ((c as any).conditionalMappingEnabled === true)
                         ? (String((c as any).conditionalMappingValue || "").trim() || undefined)
@@ -2919,6 +3108,7 @@ export class Visual implements IVisual {
             this.pendingCustomTableJson = json;
             this.pendingCustomTableSetAt = Date.now();
             this.customTableEditorDraft = null;
+            this.clearCustomTableDraftSession();
 
             // Force an immediate redraw so the report reflects changes right away.
             if (this.lastDataView && this.lastViewport) {
@@ -2938,6 +3128,10 @@ export class Visual implements IVisual {
 
     private openCfEditor(): void {
         this.ensureCfDraft();
+        if (!this.isInFocusMode) {
+            const ok = this.trySwitchFocusModeState(true);
+            if (ok) this.cfFocusModeForced = true;
+        }
         this.persistObjectProperties("conditionalFormatting", { showEditor: true });
     }
 
@@ -2983,6 +3177,23 @@ export class Visual implements IVisual {
         panel.className = "fm-cf-panel";
         overlay.appendChild(panel);
 
+        // Save initial draft snapshot.
+        this.saveCfDraftToSession(draft);
+
+        // Autosave draft while editor is open, so resize/re-render doesn't reset in-progress edits.
+        {
+            let t: any = null;
+            const schedule = () => {
+                if (t) return;
+                t = setTimeout(() => {
+                    t = null;
+                    this.saveCfDraftToSession(draft);
+                }, 150);
+            };
+            panel.addEventListener("input", schedule);
+            panel.addEventListener("change", schedule);
+        }
+
         const header = document.createElement("div");
         header.className = "fm-cf-header";
         panel.appendChild(header);
@@ -2991,6 +3202,11 @@ export class Visual implements IVisual {
         title.className = "fm-cf-title";
         title.textContent = "Conditional formatting";
         header.appendChild(title);
+
+        const note = document.createElement("div");
+        note.className = "fm-cf-style-note";
+        note.textContent = "Tip: for more space, open this visual in Focus mode.";
+        header.appendChild(note);
 
         type FormatProp = CFFormatProp;
         type ApplyToView = CFRuleTarget | "all";
@@ -3759,6 +3975,7 @@ export class Visual implements IVisual {
             this.persistObjectProperties("conditionalFormatting", { rulesJson: json, showEditor: false });
             this.cfRulesJson = json;
             this.cfEditorDraft = null;
+            this.clearCfDraftSession();
             this.root.removeChild(overlay);
             // Re-render quickly so changes apply immediately.
             // (Power BI will also invoke update after persist.)
@@ -6986,18 +7203,20 @@ export class Visual implements IVisual {
 
                 const condEnabled = (c as any).conditionalMappingEnabled === true;
                 const condOpRaw = String((c as any).conditionalMappingOperator || "contains").trim();
-                const condOp: CTTextOperator = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals")
+                const condOp: CTTextOperator = (condOpRaw === "contains" || condOpRaw === "equals" || condOpRaw === "notEquals" || condOpRaw === "in" || condOpRaw === "notIn")
                     ? (condOpRaw as CTTextOperator)
                     : "contains";
                 const condValue = String((c as any).conditionalMappingValue || "").trim();
-                const condNeedle = condValue.toLocaleLowerCase();
+                const needles = splitCsvValues(condValue).map(s => s.toLocaleLowerCase());
                 const matchesCond = (candidate: string): boolean => {
                     if (!condEnabled) return true;
-                    if (!condNeedle) return true;
                     const hay = String(candidate || "").toLocaleLowerCase();
-                    if (condOp === "contains") return hay.indexOf(condNeedle) >= 0;
-                    if (condOp === "equals") return hay === condNeedle;
-                    if (condOp === "notEquals") return hay !== condNeedle;
+                    if (needles.length === 0) return true;
+                    if (condOp === "contains") return needles.some(n => !!n && hay.indexOf(n) >= 0);
+                    if (condOp === "equals") return needles.some(n => hay === n);
+                    if (condOp === "notEquals") return needles.every(n => hay !== n);
+                    if (condOp === "in") return needles.some(n => hay === n);
+                    if (condOp === "notIn") return needles.every(n => hay !== n);
                     return true;
                 };
 
